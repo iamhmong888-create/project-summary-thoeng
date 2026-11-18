@@ -5,7 +5,7 @@
    ===================================================================== */
 const PAGE_MODE = window.APP_MODE || 'learner';
 let MODE = PAGE_MODE;
-const ADMIN_VIEWS = ['login','setup','home','new','edit','p','r','test','org','staff','rooms'];
+const ADMIN_VIEWS = ['login','setup','home','new','edit','p','r','test','org','staff','rooms','summary','sumpdf'];
 const FIREBASE_CONFIG = window.FIREBASE_CONFIG || null;
 const DOCX_URL = 'https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js';
 const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
@@ -82,7 +82,8 @@ async function sha256(s){ const b=await crypto.subtle.digest('SHA-256', new Text
 async function staffEmail(name){ return 't'+(await sha256('psum-staff:'+nameKey(name))).slice(0,24)+STAFF_DOMAIN; }
 
 function thDate(d){ if(!d) return ''; const x = new Date(d+'T00:00:00'); return isNaN(x) ? d : x.toLocaleDateString('th-TH',{day:'numeric',month:'long',year:'numeric'}); }
-function dateRange(p){
+function dateRange(p){ return dateOnly(p); }
+function dateOnly(p){
   if(!p.startDate) return '';
   if(!p.endDate || p.endDate===p.startDate) return 'วันที่ ' + thDate(p.startDate);
   return 'วันที่ ' + thDate(p.startDate) + ' ถึงวันที่ ' + thDate(p.endDate);
@@ -308,6 +309,8 @@ class LocalStore{
   async deletePhoto(pid,id){ delete this.mem.photos[pid][id]; this.persist(); }
   async getSettings(){ return {...DEFAULT_SETTINGS, ...this.mem.settings}; }
   async getClasses(){ return this.mem.classes || DEFAULT_CLASSES; }
+  async getYears(){ return this.mem.years || []; }
+  async saveYears(list){ this.mem.years=list; this.persist(); }
   async saveClasses(list){ this.mem.classes=list; this.persist(); }
   async saveSettings(s){ this.mem.settings=s; this.persist(); }
 }
@@ -418,6 +421,8 @@ class FireStore{
   async deletePhoto(pid,id){ await this.P().doc(pid).collection('photos').doc(id).delete(); }
   async getSettings(){ try{ const d=await this.db.collection('settings').doc('main').get(); return {...DEFAULT_SETTINGS, ...(d.exists?d.data():{})}; }catch(e){ return {...DEFAULT_SETTINGS}; } }
   async saveSettings(s){ await this.db.collection('settings').doc('main').set(s); }
+  async getYears(){ try{ const d=await this.db.collection('meta').doc('years').get(); return d.exists ? d.data().list||[] : []; }catch(e){ return []; } }
+  async saveYears(list){ await this.db.collection('meta').doc('years').set({list}); }
   async getClasses(){ try{ const d=await this.db.collection('meta').doc('classes').get(); return d.exists ? d.data().list||[] : DEFAULT_CLASSES; }catch(e){ return DEFAULT_CLASSES; } }
   async saveClasses(list){ await this.db.collection('meta').doc('classes').set({list}); }
 }
@@ -621,7 +626,7 @@ function drawHeader(){
     return;
   }
   h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand">ระบบสรุปผลการดำเนินโครงการ<small>${esc(org)}</small></div>
-    <nav>${S.user?`<a href="#home">โครงการ</a><a href="#new">+ โครงการใหม่</a>${isAdmin()?'<a href="#staff">บุคลากร</a><a href="#rooms">ห้องเรียน</a><a href="#org">ตั้งค่าหน่วยงาน</a>':''}
+    <nav>${S.user?`<a href="#home">โครงการ</a><a href="#new">+ โครงการใหม่</a>${isAdmin()?'<a href="#summary">สรุปรายปี</a><a href="#staff">บุคลากร</a><a href="#rooms">ห้องเรียน</a><a href="#org">ตั้งค่าหน่วยงาน</a>':''}
       <span class="who">👤 ${esc(S.user.name)}${isAdmin()?' (ผู้ดูแล)':''}</span><button id="logoutBtn">ออกจากระบบ</button>`:''}
       ${!S.firebase?'<span class="badge">โหมดทดลอง</span>':''}</nav>`;
   if($('#logoutBtn')) $('#logoutBtn').onclick=async()=>{ await S.store.logout(); S.user=null; drawHeader(); location.hash='login'; route(); };
@@ -651,6 +656,8 @@ async function route(){
     if(view==='org' && isAdmin()) return await renderSettings();
     if(view==='staff' && isAdmin()) return await renderStaff();
     if(view==='rooms' && isAdmin()) return await renderRooms();
+    if(view==='summary' && isAdmin()) return await renderSummary();
+    if(view==='sumpdf' && isAdmin()) return await renderSummaryPdf(id);
     return await renderHome();
   }catch(e){
     console.error(e);
@@ -925,6 +932,83 @@ async function renderStaff(){
 }
 
 /* ------------------------------------------------------------------ */
+/* สรุปรายปีงบประมาณ (แอดมิน)                                          */
+/* ------------------------------------------------------------------ */
+async function renderSummary(){
+  app.innerHTML='<div class="empty">กำลังรวบรวมข้อมูลทุกโครงการ…</div>';
+  const ps=await S.store.listProjects();
+  const years=yearList(await S.store.getYears(), ps);
+  let fy = S.sfy ?? (years.includes(String(currentFY()))?String(currentFY()):years[0]);
+  const detail=new Map();
+  await Promise.all(ps.map(async p=>{
+    const [resps,trows]=await Promise.all([S.store.listResponses(p.id),S.store.listTests(p.id)]);
+    detail.set(p.id,{st:computeStats(p,resps),ts:testStats(p,trows)});
+  }));
+  const draw=()=>{
+    const rows=ps.filter(p=>!fy||String(p.fiscalYear)===fy).sort((a,b)=>String(a.startDate||'9').localeCompare(String(b.startDate||'9')));
+    const D=p=>detail.get(p.id);
+    const tot={n:rows.length, people:0, target:0, bp:0, bs:0, sat:[], pre:[], post:[]};
+    rows.forEach(p=>{ const d=D(p); tot.people+=d.st.actual; tot.target+=num(p.targetQty); tot.bp+=num(p.budgetPlanned); tot.bs+=num(p.budgetSpent);
+      if(d.st.n) tot.sat.push(d.st.overall.mean); if(d.ts.has){ if(d.ts.pre.length) tot.pre.push(d.ts.preS.pm); if(d.ts.post.length) tot.post.push(d.ts.postS.pm); } });
+    const avg=a=>a.length?a.reduce((x,y)=>x+y,0)/a.length:null;
+    const satAvg=avg(tot.sat), preAvg=avg(tot.pre), postAvg=avg(tot.post);
+    S.summaryRows=rows.map((p,i)=>{ const d=D(p); return {i:i+1,p,d}; }); S.summaryTot={...tot,satAvg,preAvg,postAvg,fy};
+    app.innerHTML=`<div class="row" style="margin-bottom:10px"><h1>สรุปรายปีงบประมาณ</h1><span class="spacer"></span><a class="btn" href="#sumpdf-${esc(fy||'all')}">📄 ดู / พิมพ์ PDF</a><button class="btn ghost" id="xls">⬇ ดาวน์โหลด Excel</button></div>
+      <div style="margin-bottom:14px">${yearPills(years, fy)}</div>
+      <div class="grid g4" style="margin-bottom:16px">
+        <div class="stat"><div class="k">จำนวนโครงการ</div><div class="v">${tot.n}</div><div class="s">${fy?'ปีงบประมาณ '+esc(fy):'ทุกปีงบประมาณ'}</div></div>
+        <div class="stat"><div class="k">ผู้เข้าร่วมโครงการ</div><div class="v">${tot.people.toLocaleString('th-TH')} คน</div><div class="s">${tot.target?`จากเป้าหมาย ${tot.target.toLocaleString('th-TH')} คน (ร้อยละ ${f2(pct(tot.people,tot.target))})`:'ยังไม่กำหนดเป้าหมาย'}</div></div>
+        <div class="stat"><div class="k">งบประมาณที่ใช้</div><div class="v">${money(tot.bs)}</div><div class="s">จากที่ได้รับ ${money(tot.bp)} บาท (ร้อยละ ${f2(pct(tot.bs,tot.bp))}) · คงเหลือ ${money(tot.bp-tot.bs)}</div></div>
+        <div class="stat"><div class="k">ความพึงพอใจเฉลี่ย</div><div class="v">${satAvg!=null?f2(satAvg):'–'}</div><div class="s">${satAvg!=null?'ระดับ'+level(satAvg):'ยังไม่มีผลประเมิน'}${preAvg!=null||postAvg!=null?` · คะแนนสอบเฉลี่ย ร้อยละ ${preAvg!=null?f2(preAvg):'-'} → ${postAvg!=null?f2(postAvg):'-'}`:''}</div></div>
+      </div>
+      <div class="card" style="overflow-x:auto"><h2>รายละเอียดแต่ละโครงการ</h2>
+      ${rows.length?`<table class="t"><thead><tr><th class="c">ที่</th><th style="min-width:220px">โครงการ</th><th style="min-width:130px">วันที่</th><th>สถานที่</th><th>ผู้รับผิดชอบ</th><th class="num">ผู้เข้าร่วม (คน)</th><th class="num">งบได้รับ</th><th class="num">ใช้จริง</th><th class="num">พึงพอใจ x̄</th><th class="num">สอบ ก่อน→หลัง (%)</th></tr></thead><tbody>
+        ${S.summaryRows.map(({i,p,d})=>`<tr class="link" data-id="${esc(p.id)}"><td class="c">${i}</td><td><b>${esc(p.name)}</b></td>
+          <td class="small">${esc(dateOnly(p).replace(/^วันที่ /,''))}</td><td class="small">${esc(p.location||'-')}</td><td class="small">${esc(p.responsible||'-')}</td>
+          <td class="num">${d.st.actual}${num(p.targetQty)?` / ${num(p.targetQty)}`:''}</td><td class="num">${money(p.budgetPlanned)}</td><td class="num">${money(p.budgetSpent)}</td>
+          <td class="num">${d.st.n?f2(d.st.overall.mean):'-'}</td><td class="num">${d.ts.has?`${d.ts.pre.length?f2(d.ts.preS.pm):'-'} → ${d.ts.post.length?f2(d.ts.postS.pm):'-'}`:'-'}</td></tr>`).join('')}
+        <tr class="tot"><td></td><td>รวม ${tot.n} โครงการ</td><td></td><td></td><td></td><td class="num">${tot.people}${tot.target?` / ${tot.target}`:''}</td><td class="num">${money(tot.bp)}</td><td class="num">${money(tot.bs)}</td><td class="num">${satAvg!=null?f2(satAvg):'-'}</td><td></td></tr>
+      </tbody></table>`:`<div class="empty">ยังไม่มีโครงการในปีงบประมาณนี้</div>`}</div>`;
+    $$('#fyTabs [data-y]').forEach(b=>b.onclick=()=>{ fy=b.dataset.y; S.sfy=fy; draw(); });
+    if($('#addY')) $('#addY').onclick=async()=>{ const y=await addYear(years); if(y){ years.push(y); years.sort((a,b)=>b-a); fy=y; S.sfy=y; draw(); } };
+    $$('tr.link').forEach(tr=>tr.onclick=()=>location.hash='p-'+tr.dataset.id);
+    $('#xls').onclick=async()=>{
+      try{
+        if(!window.XLSX) await loadScript(XLSX_URL);
+        const head=['ที่','โครงการ','ปีงบประมาณ','วันที่','สถานที่','ผู้รับผิดชอบ','เป้าหมาย (คน)','ผู้เข้าร่วม (คน)','งบได้รับ (บาท)','ใช้จริง (บาท)','ความพึงพอใจ (x̄)','ระดับ','ก่อนเรียน (%)','หลังเรียน (%)'];
+        const data=S.summaryRows.map(({i,p,d})=>[i,p.name,p.fiscalYear,dateOnly(p).replace(/^วันที่ /,''),p.location||'',p.responsible||'',num(p.targetQty)||'',d.st.actual,num(p.budgetPlanned),num(p.budgetSpent),
+          d.st.n?+f2(d.st.overall.mean):'',d.st.n?d.st.overall.lvl:'',d.ts.has&&d.ts.pre.length?+f2(d.ts.preS.pm):'',d.ts.has&&d.ts.post.length?+f2(d.ts.postS.pm):'']);
+        data.push(['','รวม','','','','',tot.target||'',tot.people,tot.bp,tot.bs,satAvg!=null?+f2(satAvg):'','','','']);
+        const ws=XLSX.utils.aoa_to_sheet([[`สรุปผลการดำเนินโครงการ ${fy?'ปีงบประมาณ '+fy:'ทุกปีงบประมาณ'} — ${S.settings.org}`],[],head,...data]);
+        ws['!cols']=[6,50,10,30,36,26,10,10,14,14,12,10,10,10].map(w=>({wch:w}));
+        const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,fy?'ปีงบ '+fy:'ทุกปี');
+        const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+        await download(new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`สรุปโครงการ_${fy||'ทุกปี'}.xlsx`);
+      }catch(e){ toast('สร้างไฟล์ไม่สำเร็จ: '+e.message); }
+    };
+  };
+  draw();
+}
+
+async function renderSummaryPdf(fyKey){
+  const fy=fyKey==='all'?'':fyKey;
+  if(!S.summaryRows || (S.summaryTot?.fy||'')!==fy){ S.sfy=fy; await renderSummary(); }
+  const rows=S.summaryRows, t=S.summaryTot;
+  const B=[
+    {k:'title',text:'สรุปผลการดำเนินโครงการ'+(fy?' ประจำปีงบประมาณ '+fy:''),size:20},
+    {k:'title',text:S.settings.org,size:17},
+    {k:'space',n:1},
+    {k:'raw',html:`<p class="rp-p">จำนวนโครงการทั้งหมด ${t.n} โครงการ มีผู้เข้าร่วมโครงการรวม ${t.people.toLocaleString('th-TH')} คน${t.target?` จากเป้าหมาย ${t.target.toLocaleString('th-TH')} คน คิดเป็นร้อยละ ${f2(pct(t.people,t.target))}`:''} ได้รับงบประมาณรวม ${money(t.bp)} บาท ใช้จ่ายจริง ${money(t.bs)} บาท คิดเป็นร้อยละ ${f2(pct(t.bs,t.bp))} คงเหลือ ${money(t.bp-t.bs)} บาท${t.satAvg!=null?` ความพึงพอใจเฉลี่ยของผู้เข้าร่วมทุกโครงการอยู่ในระดับ${level(t.satAvg)} (x̄ = ${f2(t.satAvg)})`:''}</p>`},
+    {k:'table',head:['ที่','โครงการ','วันที่','สถานที่','ผู้รับผิดชอบ','ผู้เข้าร่วม (คน)','งบได้รับ (บาท)','ใช้จริง (บาท)','พึงพอใจ x̄'],
+      widths:[4,23,13,15,12,8,9.5,9.5,6],align:['c','l','l','l','l','c','r','r','c'],
+      rows:[...rows.map(({i,p,d})=>[i,p.name,dateOnly(p).replace(/^วันที่ /,''),p.location||'-',p.responsible||'-',`${d.st.actual}${num(p.targetQty)?' / '+num(p.targetQty):''}`,money(p.budgetPlanned),money(p.budgetSpent),d.st.n?f2(d.st.overall.mean):'-']),
+        ['','รวม '+t.n+' โครงการ','','','',`${t.people}${t.target?' / '+t.target:''}`,money(t.bp),money(t.bs),t.satAvg!=null?f2(t.satAvg):'-']],
+      bold:[rows.length]}
+  ];
+  await renderPdfView({back:'#summary', backText:'กลับไปหน้าสรุปรายปี', B, opt:{landscape:true}, fname:'สรุปโครงการ_'+(fy||'ทุกปี')});
+}
+
+/* ------------------------------------------------------------------ */
 /* ห้องเรียน / ครูประจำกลุ่ม (แอดมินแก้ไขได้)                          */
 /* ------------------------------------------------------------------ */
 async function renderRooms(){
@@ -959,21 +1043,25 @@ async function renderRooms(){
 async function renderHome(){
   app.innerHTML='<div class="empty">กำลังโหลด…</div>';
   const ps=await S.store.listProjects();
-  const years=[...new Set([...ps.map(p=>p.fiscalYear).filter(Boolean),String(currentFY()),String(currentFY()+1)])].sort().reverse();
+  const years=yearList(await S.store.getYears(), ps);
+  if(S.fy==null) S.fy = years.includes(String(currentFY())) ? String(currentFY()) : '';
   app.innerHTML=`
     ${!S.firebase?`<div class="note"><b>โหมดทดลอง:</b> ข้อมูลเก็บในเบราว์เซอร์เครื่องนี้เท่านั้น และมีโครงการตัวอย่างให้ลองใช้${inFrame?' · หน้าตัวอย่างนี้ดาวน์โหลดรายงาน Word ได้ แต่ปุ่มพิมพ์จะใช้ได้เมื่อติดตั้งบน GitHub Pages':''}</div>`:''}
     <div class="row" style="margin-bottom:12px"><h1>โครงการ</h1><span class="spacer"></span><a class="btn ghost" href="${PAGE_MODE==='learner'?'#':'index.html'}">หน้าผู้เรียน ↗</a><a class="btn" href="#new">+ สร้างโครงการ</a></div>
+    <div style="margin-bottom:12px" id="fyBox"></div>
     <div class="grid g4" id="sum" style="margin-bottom:16px"></div>
     <div class="card">
       <div class="row" style="margin-bottom:10px">
         <input type="search" id="q" placeholder="ค้นหาชื่อโครงการ / สถานที่ / ผู้รับผิดชอบ" style="flex:1;min-width:220px">
-        <select id="fy" style="width:auto"><option value="">ทุกปีงบประมาณ</option>${years.map(y=>`<option ${y===String(currentFY())?'selected':''}>${esc(y)}</option>`).join('')}</select>
         <label style="margin:0;font-weight:400;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mine" ${isAdmin()?'':'checked'}> เฉพาะโครงการของฉัน</label>
       </div>
       <div id="list" style="overflow-x:auto"></div>
     </div>`;
   const draw=()=>{
-    const q=$('#q').value.trim().toLowerCase(), fy=$('#fy').value, mine=$('#mine').checked;
+    const q=$('#q').value.trim().toLowerCase(), fy=S.fy, mine=$('#mine').checked;
+    $('#fyBox').innerHTML=yearPills(years, fy);
+    $$('#fyTabs [data-y]').forEach(b=>b.onclick=()=>{ S.fy=b.dataset.y; draw(); });
+    if($('#addY')) $('#addY').onclick=async()=>{ const y=await addYear(years); if(y){ years.push(y); years.sort((a,b)=>b-a); S.fy=y; draw(); } };
     const rows=ps.filter(p=>(!fy||p.fiscalYear===fy) && (!mine||!p.owner||p.owner===S.user.email) && (!q||[p.name,p.location,p.responsible,p.ownerName].join(' ').toLowerCase().includes(q)));
     const bp=rows.reduce((a,p)=>a+num(p.budgetPlanned),0), bs=rows.reduce((a,p)=>a+num(p.budgetSpent),0);
     const openCount=rows.filter(p=>p.surveyOpen!==false||p.test?.preOpen||p.test?.postOpen).length;
@@ -982,15 +1070,14 @@ async function renderHome(){
       <div class="stat"><div class="k">งบประมาณที่ได้รับ</div><div class="v">${money(bp)}</div><div class="s">บาท</div></div>
       <div class="stat"><div class="k">ใช้จ่ายจริง</div><div class="v">${money(bs)}</div><div class="s">ร้อยละ ${f2(pct(bs,bp))} ของงบที่ได้รับ</div></div>
       <div class="stat"><div class="k">เปิดให้ผู้เรียนทำแบบทดสอบ/ประเมิน</div><div class="v">${openCount}</div><div class="s">โครงการ</div></div>`;
-    $('#list').innerHTML = rows.length ? `<table class="t"><thead><tr><th>โครงการ</th><th>วันที่</th><th>ผู้รับผิดชอบ</th><th class="num">งบประมาณ (บาท)</th><th class="c">เปิดรับ</th></tr></thead><tbody>
+    $('#list').innerHTML = rows.length ? `<table class="t"><thead><tr><th>โครงการ</th><th>ปีงบ</th><th>วันที่</th><th>ผู้รับผิดชอบ</th><th class="num">งบประมาณ (บาท)</th><th class="c">เปิดรับ</th></tr></thead><tbody>
       ${rows.map(p=>`<tr class="link" data-id="${esc(p.id)}"><td><b>${esc(p.name)}</b><div class="muted small">${esc(p.location||'')}</div></td>
-        <td class="small">${esc(thDate(p.startDate))}</td><td class="small">${esc(p.responsible||p.ownerName||'')}</td>
+        <td class="small">${esc(p.fiscalYear||'')}</td><td class="small">${esc(thDate(p.startDate))}</td><td class="small">${esc(p.responsible||p.ownerName||'')}</td>
         <td class="num">${money(p.budgetPlanned)}</td><td class="c small">${[p.test?.preOpen&&'ก่อน',p.test?.postOpen&&'หลัง',p.surveyOpen!==false&&'ประเมิน'].filter(Boolean).map(x=>`<span class="pill">${x}</span>`).join(' ')||'<span class="pill off">ปิด</span>'}</td></tr>`).join('')}
       </tbody></table>` : `<div class="empty">ยังไม่มีโครงการ${q||fy||mine?'ที่ตรงกับเงื่อนไข':''}<br><br><a class="btn" href="#new">+ สร้างโครงการ</a></div>`;
     $$('#list tr.link').forEach(tr=>tr.onclick=()=>location.hash='p-'+tr.dataset.id);
   };
-  $('#q').oninput=draw; $('#fy').onchange=draw; $('#mine').onchange=draw;
-  if(!years.includes(String(currentFY()))) $('#fy').value='';
+  $('#q').oninput=draw; $('#mine').onchange=draw;
   draw();
 }
 
@@ -1002,7 +1089,8 @@ async function renderEdit(id){
   if(id && !p) throw new Error('ไม่พบโครงการนี้');
   let hasResp=false;
   if(p){ hasResp=(await S.store.listResponses(id)).length>0; }
-  p = p || { fiscalYear:String(currentFY()), items:parseItems(DEFAULT_ITEMS), surveyOpen:true, targetQualPct:80, budgetSource:'งบดำเนินงาน', actualQty:'',
+  const years=yearList(await S.store.getYears(), await S.store.listProjects());
+  p = p || { fiscalYear:S.fy||(years.includes(String(currentFY()))?String(currentFY()):years[0]), items:parseItems(DEFAULT_ITEMS), surveyOpen:true, targetQualPct:80, budgetSource:'งบดำเนินงาน', actualQty:'',
     responsible:[S.user.prefix,S.user.name,' ',S.user.surname].join('').trim(), responsiblePos:S.user.position||'',
     owner:S.user.email, ownerName:S.user.name, test:{questions:[],preOpen:true,postOpen:false,showScore:true,passPct:60} };
   const v=k=>esc(p[k]??'');
@@ -1013,7 +1101,7 @@ async function renderEdit(id){
     <fieldset><legend>ข้อมูลโครงการ</legend>
       <label>ชื่อโครงการ *</label><input type="text" name="name" value="${v('name')}" required placeholder="เช่น โครงการอบรมอาชีพการทำไม้กวาดดอกหญ้า">
       <div class="grid g2">
-        <div><label>ปีงบประมาณ</label><select name="fiscalYear">${fyOptions(p.fiscalYear)}</select></div>
+        <div><label>ปีงบประมาณ</label><div class="row" style="flex-wrap:nowrap;gap:6px"><select name="fiscalYear" id="fySel">${fyOptions(years, p.fiscalYear)}</select>${isAdmin()?'<button type="button" class="btn ghost sm" id="addY" title="เพิ่มปีงบประมาณ" style="white-space:nowrap">+ ปี</button>':''}</div></div>
         <div><label>ผู้รับผิดชอบโครงการ</label><input type="text" name="responsible" value="${v('responsible')}" placeholder="ชื่อ-สกุล"></div>
         <div><label>ตำแหน่งผู้รับผิดชอบ</label><input type="text" name="responsiblePos" value="${v('responsiblePos')}"></div>
       </div>
@@ -1060,6 +1148,7 @@ async function renderEdit(id){
     <div class="row end"><a class="btn ghost" href="${id?'#p-'+esc(id):'#home'}">ยกเลิก</a><button class="btn" id="saveBtn">บันทึกโครงการ</button></div>
     </form>`;
   $('#resetItems').onclick=()=>{ $('[name=items]').value=DEFAULT_ITEMS; };
+  if($('#addY')) $('#addY').onclick=async()=>{ const y=await addYear(years); if(y){ years.push(y); years.sort((a,b)=>b-a); $('#fySel').innerHTML=fyOptions(years,y); } };
   $('#pf').onsubmit=async e=>{
     e.preventDefault(); const f=e.target; const fd=new FormData(f);
     const data={...p}; for(const [k,val] of fd.entries()) if(k!=='items'&&k!=='surveyOpen') data[k]=String(val).trim();
@@ -1137,9 +1226,41 @@ async function renderTestEditor(id){
 /* ------------------------------------------------------------------ */
 /* หน้ารายละเอียดโครงการ + ผลวิเคราะห์                                 */
 /* ------------------------------------------------------------------ */
-function fyOptions(sel, extra=[]){
-  const c=currentFY(); const ys=[...new Set([c-2,c-1,c,c+1,c+2,...extra.map(Number)].filter(Boolean).concat(sel?[+sel]:[]))].sort((a,b)=>b-a);
-  return ys.map(y=>`<option value="${y}" ${String(y)===String(sel||c)?'selected':''}>${y}${y===c?' (ปีปัจจุบัน)':y===c+1?' (ปีหน้า)':''}</option>`).join('');
+/* ปีงบประมาณ: รายการที่แอดมินเพิ่มไว้ + ปีที่มีโครงการอยู่แล้ว */
+function yearList(stored, ps=[]){
+  const ys=[...new Set([...(stored||[]), ...ps.map(p=>p.fiscalYear)].map(y=>String(y||'').trim()).filter(y=>/^\d{4}$/.test(y)))];
+  if(!ys.length) ys.push(String(currentFY()));
+  return ys.sort((a,b)=>b-a);
+}
+const fyTag=y=>{ const c=currentFY(); return +y===c?' (ปีปัจจุบัน)':+y===c+1?' (ปีหน้า)':''; };
+function fyOptions(years, sel){
+  const c=String(currentFY()); const pick=sel||(years.includes(c)?c:years[0]);
+  return years.map(y=>`<option value="${esc(y)}" ${y===String(pick)?'selected':''}>${esc(y)}${fyTag(y)}</option>`).join('');
+}
+function addYearDialog(years){
+  const next=String(Math.max(currentFY(), ...years.map(Number))+1);
+  return new Promise(res=>{
+    const m=document.createElement('div'); m.className='modal';
+    m.innerHTML=`<div class="box"><h2 style="margin-top:0">+ เพิ่มปีงบประมาณ</h2><label>ปีงบประมาณ (พ.ศ.)</label>
+      <input type="number" id="ny" value="${next}" min="2500" max="2700"><div class="err" id="nyErr" style="margin-top:4px"></div>
+      <div class="row end" style="margin-top:14px"><button class="btn ghost" data-v="0">ยกเลิก</button><button class="btn" data-v="1">เพิ่ม</button></div></div>`;
+    m.addEventListener('click',e=>{ const v=e.target.dataset.v; if(v==null) return;
+      if(v==='0'){ m.remove(); res(null); return; }
+      const y=String($('#ny',m).value).trim();
+      if(!/^25\d\d$|^26\d\d$/.test(y)){ $('#nyErr',m).textContent='กรุณาใส่ปี พ.ศ. 4 หลัก เช่น '+next; return; }
+      if(years.includes(y)){ $('#nyErr',m).textContent='มีปีนี้อยู่แล้ว'; return; }
+      m.remove(); res(y); });
+    document.body.appendChild(m); $('#ny',m).focus();
+  });
+}
+async function addYear(years){
+  const y=await addYearDialog(years); if(!y) return null;
+  const stored=await S.store.getYears(); await S.store.saveYears([...new Set([...stored,...years,y])]);
+  toast('เพิ่มปีงบประมาณ '+y+' แล้ว'); return y;
+}
+function yearPills(years, sel, all=true){
+  return `<div class="tabs" id="fyTabs">${all?`<button type="button" class="btn sm ${sel===''?'':'ghost'}" data-y="">ทุกปี</button>`:''}${years.map(y=>`<button type="button" class="btn sm ${sel===y?'':'ghost'}" data-y="${esc(y)}">ปีงบประมาณ ${esc(y)}${fyTag(y)}</button>`).join('')}
+    ${isAdmin()?'<button type="button" class="btn ghost sm" id="addY" style="border-style:dashed">+ ปีงบประมาณ</button>':''}</div>`;
 }
 function distTable(title, rows, total){
   return `<div><h3 style="font-size:16px;margin:0 0 6px">${esc(title)}</h3><table class="t"><thead><tr><th>${esc(title)}</th><th class="num">จำนวน</th><th class="num">ร้อยละ</th></tr></thead><tbody>
@@ -1421,9 +1542,10 @@ function buildReport(p, st, ts, photos, resps, set){
 }
 
 const olLabel=(pre,i)=>pre?`${pre}${i+1}`:`${i+1}.`;
-function reportToHTML(B){
+function reportToHTML(B){ return B.map(blockHTML).join('\n'); }
+function blockHTML(b){
   const o=[];
-  for(const b of B){
+  {
     switch(b.k){
       case 'space': o.push(`<div style="height:${b.n*1.4}em"></div>`); break;
       case 'logo': o.push(`<div style="text-align:center"><img src="logo.png" alt="" style="width:150px;height:150px"></div>`); break;
@@ -1435,12 +1557,97 @@ function reportToHTML(B){
       case 'p': o.push(`<p class="rp-p">${esc(b.text)}</p>`); break;
       case 'li': o.push(`<p class="rp-li">${esc(b.text)}</p>`); break;
       case 'ol': b.items.forEach((t,i)=>o.push(`<p class="rp-li">${b.plain?'':esc(olLabel(b.prefix,i)+' ')}${esc(t)}</p>`)); break;
-      case 'table': o.push(`<table><thead><tr>${b.head.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${b.rows.map((r,ri)=>`<tr class="${(b.bold||[]).includes(ri)?'b':''}">${r.map((c,ci)=>`<td style="text-align:${({l:'left',c:'center',r:'right'})[b.align?.[ci]||'l']}">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`); break;
+      case 'table': o.push(`<table>${b.widths?`<colgroup>${b.widths.map(w=>`<col style="width:${w}%">`).join('')}</colgroup>`:''}<thead><tr>${b.head.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${b.rows.map((r,ri)=>`<tr class="${(b.bold||[]).includes(ri)?'b':''}">${r.map((c,ci)=>`<td style="text-align:${({l:'left',c:'center',r:'right'})[b.align?.[ci]||'l']}">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`); break;
       case 'imgs': o.push(`<div class="rp-imgs">${b.items.map(ph=>`<figure><img src="${ph.data}" alt="">${ph.caption?`<figcaption>${esc(ph.caption)}</figcaption>`:''}</figure>`).join('')}</div>`); break;
       case 'sign': o.push(`<div class="rp-sign">${b.lines.map(l=>`<div>${esc(l)||'&nbsp;'}</div>`).join('')}</div>`); break;
+      case 'raw': o.push(b.html); break;
     }
   }
   return o.join('\n');
+}
+
+/* ------------------------------------------------------------------ */
+/* สร้าง PDF: จัดหน้า A4 เอง (ขอบซ้าย 3 ซม. ขวา/บน/ล่าง 2.5 ซม.)        */
+/* ไม่มีหัว/ท้ายกระดาษของเบราว์เซอร์ ไม่มีวันที่พิมพ์ ไม่มีชื่อระบบ        */
+/* ------------------------------------------------------------------ */
+const JSPDF_URL='https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+const H2C_URL='https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+const CM=37.795; // px ต่อ 1 ซม. (96 dpi)
+function paginate(B, opt={}){
+  const land=!!opt.landscape;
+  const W=land?1123:794, H=land?794:1123, ML=3*CM, MR=2.5*CM, MT=2.5*CM, MB=2.5*CM;
+  const host=document.createElement('div'); host.className='pdfhost'; document.body.appendChild(host);
+  const pages=[]; let cur=null;
+  const newPage=()=>{ const pg=document.createElement('div'); pg.className='pg paper'; pg.style.cssText=`width:${W}px;height:${H}px;padding:${MT}px ${MR}px ${MB}px ${ML}px`;
+    const c=document.createElement('div'); c.className='pgc'; c.style.height=(H-MT-MB)+'px'; pg.appendChild(c); host.appendChild(pg); pages.push(pg); cur=c; return c; };
+  const over=()=>cur.scrollHeight>cur.clientHeight+1;
+  const keepWithNext=el=>el && /rp-h1|rp-h2|rp-cap/.test(el.className||'');
+  const toEl=html=>{ const t=document.createElement('div'); t.innerHTML=html; return [...t.children]; };
+  newPage();
+  // แตกรูปเป็นแถวละ 2 รูป
+  const blocks=[]; B.forEach(b=>{ if(b.k==='imgs'){ for(let i=0;i<b.items.length;i+=2) blocks.push({k:'imgs',items:b.items.slice(i,i+2)}); } else blocks.push(b); });
+  for(const b of blocks){
+    if(b.pb && cur.children.length) newPage();
+    const els=toEl(blockHTML({...b,pb:false}).replace('<div class="rp-pb"></div>',''));
+    for(const el of els){
+      if(el.tagName==='TABLE'){
+        const head=el.tHead, cg=el.querySelector('colgroup'), rows=[...el.tBodies[0].rows];
+        let tb=null;
+        const startTable=()=>{ const t=document.createElement('table'); if(cg) t.appendChild(cg.cloneNode(true)); t.appendChild(head.cloneNode(true)); tb=document.createElement('tbody'); t.appendChild(tb); cur.appendChild(t); return t; };
+        let t=startTable();
+        for(const r of rows){ tb.appendChild(r); if(over()){ tb.removeChild(r);
+          if(!tb.rows.length){ cur.removeChild(t); const prev=cur.lastElementChild; newPage(); if(keepWithNext(prev)) cur.appendChild(prev); }
+          else newPage();
+          t=startTable(); tb.appendChild(r); } }
+        continue;
+      }
+      cur.appendChild(el);
+      if(over()){ cur.removeChild(el); const prev=cur.lastElementChild; newPage(); if(keepWithNext(prev)) cur.appendChild(prev); cur.appendChild(el); }
+    }
+  }
+  // เลขหน้า มุมขวาบน (ไม่ใส่หน้าปก)
+  if(opt.pageNumbers!==false && pages.length>1) pages.forEach((pg,i)=>{ if(i===0 && opt.cover) return; const n=document.createElement('div'); n.className='pgno'; n.style.cssText=`top:${1.3*CM}px;right:${MR}px`; n.textContent=String(i+1); pg.appendChild(n); });
+  return {host,pages,W,H,land};
+}
+async function buildPdf(B, opt={}, onProgress=()=>{}){
+  if(!window.html2canvas) await loadScript(H2C_URL);
+  if(!window.jspdf) await loadScript(JSPDF_URL);
+  try{ await document.fonts.ready; }catch(e){}
+  const {host,pages,land}=paginate(B,opt);
+  await Promise.all([...host.querySelectorAll('img')].map(i=>i.decode?i.decode().catch(()=>{}):null));
+  const pdf=new window.jspdf.jsPDF({unit:'mm',format:'a4',orientation:land?'landscape':'portrait',compress:true});
+  const imgs=[];
+  for(let i=0;i<pages.length;i++){
+    onProgress(i+1,pages.length);
+    const cv=await html2canvas(pages[i],{scale:2,backgroundColor:'#ffffff',useCORS:true,logging:false});
+    const url=cv.toDataURL('image/jpeg',0.9); imgs.push(url);
+    if(i) pdf.addPage('a4',land?'landscape':'portrait');
+    pdf.addImage(url,'JPEG',0,0,land?297:210,land?210:297,undefined,'FAST');
+  }
+  host.remove();
+  return {blob:pdf.output('blob'), imgs};
+}
+function printPdfBlob(blob){
+  const url=URL.createObjectURL(blob);
+  const f=document.createElement('iframe'); f.style.cssText='position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0';
+  f.src=url; document.body.appendChild(f);
+  f.onload=()=>{ setTimeout(()=>{ try{ f.contentWindow.focus(); f.contentWindow.print(); }catch(e){ try{ window.open(url,'_blank'); }catch(x){ toast('สั่งพิมพ์ไม่ได้ในหน้านี้ — กรุณาดาวน์โหลด PDF แล้วพิมพ์'); } } },300); };
+  setTimeout(()=>{ f.remove(); URL.revokeObjectURL(url); },120000);
+}
+/* หน้าดูตัวอย่าง PDF พร้อมปุ่มพิมพ์และดาวน์โหลด */
+async function renderPdfView({back, backText, B, opt, fname, extraBtn=''}){
+  app.innerHTML=`<div class="row noprint" style="margin-bottom:14px"><a href="${back}" class="backbtn">← ${esc(backText)}</a><span class="spacer"></span>
+      <button class="btn" id="prtPdf" disabled>🖨 พิมพ์</button><button class="btn" id="dlPdf" disabled>⬇ ดาวน์โหลด PDF</button>${extraBtn}</div>
+    <div class="pdfview" id="pv"><div class="empty" id="pvMsg">กำลังสร้าง PDF…</div></div>`;
+  let res;
+  try{ res=await buildPdf(B,opt,(i,n)=>{ const m=$('#pvMsg'); if(m) m.textContent=`กำลังสร้าง PDF… หน้า ${i} / ${n}`; }); }
+  catch(e){ console.error(e); $('#pv').innerHTML=`<div class="card"><p class="err">สร้าง PDF ไม่สำเร็จ: ${esc(e.message)}</p></div>`; return null; }
+  $('#pv').innerHTML=`<div class="muted small" style="text-align:center;margin-bottom:8px">ตัวอย่าง PDF ${res.imgs.length} หน้า · A4 ขอบซ้าย 3 ซม. ขวา บน ล่าง 2.5 ซม.</div>`+
+    res.imgs.map((u,i)=>`<img class="pvpage ${opt?.landscape?'land':''}" src="${u}" alt="หน้า ${i+1}">`).join('');
+  $('#prtPdf').disabled=false; $('#dlPdf').disabled=false;
+  $('#prtPdf').onclick=()=>printPdfBlob(res.blob);
+  $('#dlPdf').onclick=()=>download(res.blob, fname+'.pdf');
+  return res;
 }
 
 async function reportToDocx(B, filename){
@@ -1452,7 +1659,7 @@ async function reportToDocx(B, filename){
     indent:o.first?{firstLine:720}:(o.left?{left:o.left}:undefined),spacing:{before:o.before||0,after:o.after||0,line:o.line}});
   const none={style:D.BorderStyle.NONE,size:0,color:'FFFFFF'};
   const thin={style:D.BorderStyle.SINGLE,size:4,color:'666666'};
-  const out=[]; const CW=11906-1701-1134;
+  const out=[]; const CW=11906-1701-1417;
   for(const b of B){
     switch(b.k){
       case 'space': for(let i=0;i<b.n;i++) out.push(P([R('')])); break;
@@ -1499,7 +1706,7 @@ async function reportToDocx(B, filename){
     creator:S.settings.org, title:filename,
     styles:{default:{document:{run:{font:F,size:32}}}},
     sections:[{
-      properties:{titlePage:true,page:{size:{width:11906,height:16838},margin:{top:1418,bottom:1134,left:1701,right:1134}}},
+      properties:{titlePage:true,page:{size:{width:11906,height:16838},margin:{top:1417,bottom:1417,left:1701,right:1417,header:700}}},
       headers:{default:new D.Header({children:[new D.Paragraph({alignment:D.AlignmentType.RIGHT,children:[new D.TextRun({children:[D.PageNumber.CURRENT],font:F,size:32})]})]}),
                first:new D.Header({children:[P([])]})},
       children:out }]
@@ -1515,14 +1722,12 @@ async function renderReport(id){
   const st=computeStats(p,resps), ts=testStats(p,trows);
   const B=buildReport(p,st,ts,photos,resps,S.settings);
   const fname=('รายงานผล_'+(p.name||'โครงการ')).replace(/[\\/:*?"<>|]/g,'').slice(0,80);
-  app.innerHTML=`<div class="row noprint" style="margin-bottom:14px"><a href="#p-${esc(id)}" class="backbtn">← กลับไปหน้าโครงการ</a><span class="spacer"></span>
-      <button class="btn" id="dlW">⬇ ดาวน์โหลด Word (.docx)</button><button class="btn ghost" id="prt">พิมพ์ / บันทึก PDF</button></div>
-    <div class="note noprint">ไฟล์ Word ใช้ฟอนต์ <b>TH Sarabun New</b> ขนาด 16 พอยต์ ถ้าเครื่องไม่มีฟอนต์นี้ Word จะแสดงด้วยฟอนต์อื่นแทน ปรับแก้ข้อความใน Word ได้ตามต้องการ</div>
-    <div class="paper">${reportToHTML(B)}</div>`;
+  await renderPdfView({back:'#p-'+id, backText:'กลับไปหน้าโครงการ', B, opt:{cover:true}, fname,
+    extraBtn:'<button class="btn ghost" id="dlW">⬇ Word (.docx)</button>'});
+  if(!$('#dlW')) return;
   $('#dlW').onclick=async e=>{ e.target.disabled=true; e.target.textContent='กำลังสร้างไฟล์…';
     try{ await reportToDocx(B,fname); }catch(err){ console.error(err); toast('สร้างไฟล์ไม่สำเร็จ: '+err.message); }
-    e.target.disabled=false; e.target.textContent='⬇ ดาวน์โหลด Word (.docx)'; };
-  $('#prt').onclick=()=>{ try{ window.print(); }catch(e){ toast('สั่งพิมพ์ไม่ได้ในหน้านี้'); } };
+    e.target.disabled=false; e.target.textContent='⬇ Word (.docx)'; };
 }
 
 boot();

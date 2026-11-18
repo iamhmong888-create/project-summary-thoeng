@@ -184,3 +184,14 @@ header.top .brand.brand-lg{flex:1 1 0;min-width:0}
 .pwwrap .eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:0;background:none;font-size:20px;cursor:pointer;padding:6px 10px;border-radius:8px}
 .pwwrap .eye:hover{background:var(--acc2)}
 .donetag{background:#f2c230;color:#3a2e00;font-size:13px;font-weight:700;padding:3px 10px;border-radius:99px;white-space:nowrap}
+/* PDF */
+.pdfhost{position:absolute;left:-12000px;top:0;width:auto}
+.paper.pg{max-width:none;box-shadow:none;margin:0;position:relative;box-sizing:border-box;background:#fff;font-size:15.5px;line-height:1.55;color:#000}
+.paper.pg .pgc{overflow:hidden}
+.paper.pg table{table-layout:fixed;word-wrap:break-word}
+.paper.pg .pgno{position:absolute;font-size:15.5px}
+.paper.pg .rp-imgs{margin:4px 0 10px}
+.pdfview{max-width:860px;margin:0 auto}
+.pvpage{display:block;width:100%;max-width:794px;margin:0 auto 18px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,.14)}
+.pvpage.land{max-width:1123px}
+.pdfview:has(.land){max-width:1180px}
