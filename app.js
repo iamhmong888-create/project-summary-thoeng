@@ -240,6 +240,12 @@ function checkStaffRows(rows){
 /* ------------------------------------------------------------------ */
 /* ข้อมูลสาธารณะที่ผู้เรียนเห็น (ไม่มีข้อมูลส่วนตัว)                    */
 /* ------------------------------------------------------------------ */
+/* ปิดรับจากผู้เรียนอัตโนมัติ เมื่อพ้นวันจัดกิจกรรมไปแล้ว 3 วัน (นับจากวันสิ้นสุด หรือวันเริ่มถ้าไม่มีวันสิ้นสุด) */
+const CLOSE_AFTER_DAYS = 3;
+function closeAtOf(p){ const d=p.endDate||p.startDate; if(!d) return null; const t=new Date(d+'T23:59:59'); if(isNaN(t)) return null; return t.getTime()+CLOSE_AFTER_DAYS*86400000; }
+const isExpired = x => !!(x && x.closeAt && Date.now()>x.closeAt);
+const createdOf = p => p.createdAt || p.updatedAt || 0;
+const byNewest = (a,b)=>createdOf(b)-createdOf(a);
 function publicDoc(p, settings){
   const t=p.test||{}; const qs=t.questions||[];
   const sat={open:p.surveyOpen!==false, items:p.items||[]};
@@ -247,7 +253,7 @@ function publicDoc(p, settings){
     preOpen:!!t.preOpen&&qs.length>0, postOpen:!!t.postOpen&&qs.length>0, passPct:num(t.passPct)||60,
     shuffle:t.shuffle||'none', shuffleOpt:!!t.shuffleOpt };
   return { title:p.name||'', org:settings?.org||'', dateText:dateRange(p), location:p.location||'',
-    responsible:p.responsible||'', active:sat.open||test.preOpen||test.postOpen, sat, test, updatedAt:Date.now() };
+    responsible:p.responsible||'', active:sat.open||test.preOpen||test.postOpen, sat, test, closeAt:closeAtOf(p), createdAt:createdOf(p)||Date.now(), updatedAt:Date.now() };
 }
 
 /* ------------------------------------------------------------------ */
@@ -287,16 +293,16 @@ class LocalStore{
   async updateStaff(email, data){ Object.assign(this.mem.staff[email], data); this.persist(); }
   async removeStaff(email){ delete this.mem.staff[email]; this.persist(); }
   // โครงการ
-  async listProjects(){ return Object.values(this.mem.projects).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0)); }
+  async listProjects(){ return Object.values(this.mem.projects).sort(byNewest); }
   async getProject(id){ return this.mem.projects[id] ? JSON.parse(JSON.stringify(this.mem.projects[id])) : null; }
-  async saveProject(p){ const id=p.id||uid(); this.mem.projects[id]={...p,id,updatedAt:Date.now()}; this.persist(); return id; }
+  async saveProject(p){ const id=p.id||uid(); const now=Date.now(); this.mem.projects[id]={...p,id,createdAt:p.createdAt||now,updatedAt:now}; this.persist(); return id; }
   async deleteProject(id){ for(const k of ['projects','responses','tests','photos']) delete this.mem[k][id]; this.persist(); }
   async getPublic(id){ const p=this.mem.projects[id]; return p ? publicDoc(p, this.mem.settings) : null; }
   reloadMem(){ try{ const m=JSON.parse(localStorage.getItem(this.key)||'null'); if(m) this.mem=m; }catch(e){} }
   watch(fn){ const h=e=>{ if(e.key===this.key){ this.reloadMem(); fn(); } }; window.addEventListener('storage',h); return ()=>window.removeEventListener('storage',h); }
   watchPublic(id, cb){ return this.watch(async()=>cb(await this.getPublic(id))); }
   watchPublicList(cb){ return this.watch(async()=>cb(await this.listPublic())); }
-  async listPublic(){ return Object.values(this.mem.projects).map(p=>({id:p.id,...publicDoc(p,this.mem.settings)})).filter(d=>d.active).sort((a,b)=>b.updatedAt-a.updatedAt); }
+  async listPublic(){ return Object.values(this.mem.projects).map(p=>({id:p.id,...publicDoc(p,this.mem.settings)})).filter(d=>d.active).sort(byNewest); }
   async addResponse(pid,r){ (this.mem.responses[pid] ||= {})[uid()]=r; this.persist(); }
   async listResponses(pid){ return Object.entries(this.mem.responses[pid]||{}).map(([id,r])=>({id,...r})).sort((a,b)=>a.at-b.at); }
   async deleteResponse(pid,rid){ delete (this.mem.responses[pid]||{})[rid]; this.persist(); }
@@ -388,10 +394,10 @@ class FireStore{
   }
   async updateStaff(email, data){ const cur=(await this.listStaff()).find(m=>m.email===email)||{}; delete cur.email; await this.staffRef().set({members:{[email]:{...cur,...data}}},{merge:true}); }
   async removeStaff(email){ await this.staffRef().update(new firebase.firestore.FieldPath('members',email), firebase.firestore.FieldValue.delete()); }
-  async listProjects(){ const s=await this.P().orderBy('updatedAt','desc').get(); return s.docs.map(d=>({id:d.id,...d.data()})); }
+  async listProjects(){ const s=await this.P().get(); return s.docs.map(d=>({id:d.id,...d.data()})).sort(byNewest); }
   async getProject(id){ const d=await this.P().doc(id).get(); return d.exists ? {id:d.id,...d.data()} : null; }
   async saveProject(p){
-    const {id, ...data}=p; data.updatedAt=Date.now();
+    const {id, ...data}=p; data.updatedAt=Date.now(); if(!data.createdAt) data.createdAt=data.updatedAt;
     const ref = id ? this.P().doc(id) : this.P().doc();
     await ref.set(data);
     await this.db.collection('surveys').doc(ref.id).set(publicDoc(data, S.settings));
@@ -407,8 +413,8 @@ class FireStore{
   }
   async getPublic(id){ const d=await this.db.collection('surveys').doc(id).get(); return d.exists ? d.data() : null; }
   watchPublic(id, cb){ return this.db.collection('surveys').doc(id).onSnapshot(d=>cb(d.exists?d.data():null), ()=>{}); }
-  watchPublicList(cb){ return this.db.collection('surveys').where('active','==',true).onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>b.updatedAt-a.updatedAt)), ()=>{}); }
-  async listPublic(){ const s=await this.db.collection('surveys').where('active','==',true).get(); return s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>b.updatedAt-a.updatedAt); }
+  watchPublicList(cb){ return this.db.collection('surveys').where('active','==',true).onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()})).sort(byNewest)), ()=>{}); }
+  async listPublic(){ const s=await this.db.collection('surveys').where('active','==',true).get(); return s.docs.map(d=>({id:d.id,...d.data()})).sort(byNewest); }
   async addResponse(pid,r){ await this.P().doc(pid).collection('responses').add(r); }
   async listResponses(pid){ const s=await this.P().doc(pid).collection('responses').orderBy('at').get(); return s.docs.map(d=>({id:d.id,...d.data()})); }
   async deleteResponse(pid,rid){ await this.P().doc(pid).collection('responses').doc(rid).delete(); }
@@ -490,7 +496,7 @@ function seedDemo(mem){
     objectives:'เพื่อให้ผู้เข้าร่วมมีความรู้และทักษะในการทำไม้กวาดดอกหญ้า\nเพื่อให้ผู้เข้าร่วมสามารถนำความรู้ไปประกอบอาชีพเสริมได้',
     targetGroup:'ประชาชนทั่วไปในตำบลเวียง', targetQty:25,
     targetQual:'ผู้เข้าร่วมโครงการมีความรู้และทักษะในการทำไม้กวาดดอกหญ้า และมีความพึงพอใจในระดับมากขึ้นไป', targetQualPct:80,
-    startDate:'2026-10-20', endDate:'2026-10-22', location:'ศาลาอเนกประสงค์ หมู่ 3 ตำบลเวียง อำเภอเทิง จังหวัดเชียงราย',
+    startDate:new Date(Date.now()-86400000).toISOString().slice(0,10), endDate:new Date(Date.now()+86400000).toISOString().slice(0,10), location:'ศาลาอเนกประสงค์ หมู่ 3 ตำบลเวียง อำเภอเทิง จังหวัดเชียงราย',
     budgetSource:'งบดำเนินงาน', budgetPlanned:9000, budgetSpent:8650,
     method:'ประชุมวางแผนและเสนอโครงการเพื่อขออนุมัติ\nประสานวิทยากรและกลุ่มเป้าหมาย\nทดสอบความรู้ก่อนเรียน\nจัดอบรมภาคทฤษฎีและภาคปฏิบัติ 3 วัน\nทดสอบความรู้หลังเรียนและประเมินความพึงพอใจ\nสรุปผลการดำเนินงาน',
     results:'ผู้เข้าร่วมสามารถทำไม้กวาดดอกหญ้าได้ด้วยตนเองคนละ 2–3 ด้าม และมีผู้เข้าร่วม 6 คนรวมกลุ่มกันผลิตเพื่อจำหน่าย',
@@ -508,7 +514,7 @@ function seedDemo(mem){
     const sid=String(6710000000+k*137+11);
     const base=rnd()<0.6?5:4;
     const scores=Array.from({length:nq},()=>{ const r=rnd(); return Math.max(3,Math.min(5, r<0.65?base:(r<0.85?base-1:5))); });
-    const t0=Date.now()-86400000*3;
+    const t0=Date.now()-86400000;
     R['r'+k]={ name, gender:female?'หญิง':'ชาย',
       age:pick([AGES[1],AGES[1],AGES[1],AGES[2],AGES[2],AGES[3]]), level, room,
       scores, comment:rnd()<0.3?pick(comments):'', at:t0+86400000*2+k*60000 };
@@ -626,7 +632,7 @@ function drawHeader(){
     return;
   }
   h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand">ระบบสรุปผลการดำเนินโครงการ<small>${esc(org)}</small></div>
-    <nav>${S.user?`<a href="#home">โครงการ</a><a href="#new">+ โครงการใหม่</a>${isAdmin()?'<a href="#summary">สรุปรายปี</a><a href="#staff">บุคลากร</a><a href="#rooms">ห้องเรียน</a><a href="#org">ตั้งค่าหน่วยงาน</a>':''}
+    <nav>${S.user?`<a href="#home">โครงการ</a><a href="#new">+ โครงการใหม่</a><a href="#summary">สรุปรายปี</a>${isAdmin()?'<a href="#staff">บุคลากร</a><a href="#rooms">ห้องเรียน</a><a href="#org">ตั้งค่าหน่วยงาน</a>':''}
       <span class="who">👤 ${esc(S.user.name)}${isAdmin()?' (ผู้ดูแล)':''}</span><button id="logoutBtn">ออกจากระบบ</button>`:''}
       ${!S.firebase?'<span class="badge">โหมดทดลอง</span>':''}</nav>`;
   if($('#logoutBtn')) $('#logoutBtn').onclick=async()=>{ await S.store.logout(); S.user=null; drawHeader(); location.hash='login'; route(); };
@@ -656,8 +662,8 @@ async function route(){
     if(view==='org' && isAdmin()) return await renderSettings();
     if(view==='staff' && isAdmin()) return await renderStaff();
     if(view==='rooms' && isAdmin()) return await renderRooms();
-    if(view==='summary' && isAdmin()) return await renderSummary();
-    if(view==='sumpdf' && isAdmin()) return await renderSummaryPdf(id);
+    if(view==='summary') return await renderSummary();
+    if(view==='sumpdf') return await renderSummaryPdf(id);
     return await renderHome();
   }catch(e){
     console.error(e);
@@ -679,8 +685,12 @@ async function renderLearnerHome(){
   const pills=d=>`${d.test.preOpen?'<span class="pill">ก่อนเรียน</span>':''}${d.test.postOpen?'<span class="pill">หลังเรียน</span>':''}${d.sat.open?'<span class="pill">ประเมินความพึงพอใจ</span>':''}`;
   const draw=()=>{
     const q=$('#lq').value.trim().toLowerCase();
-    const rows=list.filter(d=>!q||d.title.toLowerCase().includes(q));
-    $('#lc').innerHTML=rows.length?rows.map(d=>`<a class="lcard" href="#j-${esc(d.id)}"><b>${esc(d.title)}</b>
+    const rows=list.filter(d=>(!q||d.title.toLowerCase().includes(q)) && !(d.closeAt && Date.now()>d.closeAt+30*86400000))
+      .sort((a,b)=>(isExpired(a)-isExpired(b))||byNewest(a,b));
+    $('#lc').innerHTML=rows.length?rows.map(d=>isExpired(d)
+      ? `<div class="lcard off"><b>${esc(d.title)}</b><div class="muted small">${esc(d.dateText)}${d.location?' · '+esc(d.location):''}</div>
+         <div class="row" style="margin-top:8px"><span class="pill off">ปิดรับแล้ว</span></div></div>`
+      : `<a class="lcard" href="#j-${esc(d.id)}"><b>${esc(d.title)}</b>
       <div class="muted small">${esc(d.dateText)}${d.location?' · '+esc(d.location):''}</div>
       <div class="row" style="margin-top:8px;gap:6px">${pills(d)}</div></a>`).join('')
       :'<div class="empty" style="grid-column:1/-1">ยังไม่มีโครงการที่เปิดให้ทำแบบทดสอบหรือแบบประเมิน</div>';
@@ -693,13 +703,17 @@ async function renderJoin(id){
   let d=await S.store.getPublic(id);
   if(!d){ app.innerHTML='<div class="card sv"><h2>ไม่พบโครงการ</h2><p>ลิงก์อาจไม่ถูกต้อง กรุณาสแกน QR Code อีกครั้ง</p><a href="#" class="backbtn">← โครงการทั้งหมด</a></div>'; return; }
   saveInfo({lastProject:id});
-  const btn=(href,ic,t,open,sub,done)=>`<a class="bigbtn ${open?'':'off'}" href="${href}"><span class="ic">${ic}</span><span style="flex:1">${t}<small>${open?sub:'ยังไม่เปิดให้ทำ · หน้านี้จะอัปเดตเองเมื่อครูเปิด'}</small></span>${done?'<span class="donetag">✓ ทำแล้ว</span>':''}</a>`;
+  let exp=false;
+  const btn=(href,ic,t,open,sub,done)=>`<a class="bigbtn ${open?'':'off'}" href="${href}"><span class="ic">${ic}</span><span style="flex:1">${t}<small>${open?sub:(exp?'ปิดรับแล้ว':'ยังไม่เปิดให้ทำ · หน้านี้จะอัปเดตเองเมื่อครูเปิด')}</small></span>${done?'<span class="donetag">✓ ทำแล้ว</span>':''}</a>`;
   let prev=null;
   const draw=()=>{
     const nq=(d.test.questions||[]).length; const done=(savedInfo().done||{})[id]||{};
+    exp=isExpired(d)&&!(MODE==='admin'&&S.user);
+    if(exp){ d={...d,test:{...d.test,preOpen:false,postOpen:false},sat:{...d.sat,open:false}}; }
     app.innerHTML=`<div class="sv">
       <div class="row" style="margin-bottom:8px"><a href="#" class="backbtn">← โครงการทั้งหมด</a></div>
       <div class="card"><div class="muted small">${esc(d.org)}</div><h1>${esc(d.title)}</h1><div class="muted small">${esc(d.dateText)}${d.location?' · '+esc(d.location):''}</div></div>
+      ${exp?'<div class="note" style="font-size:16px">โครงการนี้<b>ปิดรับแล้ว</b> เนื่องจากเลยวันจัดกิจกรรมมาเกิน 3 วัน หากมีข้อสงสัยกรุณาติดต่อครูผู้รับผิดชอบ</div>':''}
       <div class="big">
         ${btn('#pre-'+esc(id),'📝','แบบทดสอบก่อนเรียน',d.test.preOpen,`${nq} ข้อ · ทำก่อนเริ่มกิจกรรม`,done.pre)}
         ${btn('#post-'+esc(id),'✅','แบบทดสอบหลังเรียน',d.test.postOpen,`${nq} ข้อ · ทำหลังจบกิจกรรม`,done.post)}
@@ -750,6 +764,7 @@ async function renderTest(id, kind){
   const label=kind==='pre'?'แบบทดสอบก่อนเรียน':'แบบทดสอบหลังเรียน';
   if(!d){ app.innerHTML='<div class="card sv"><h2>ไม่พบแบบทดสอบ</h2></div>'; return; }
   const staffEntry = MODE==='admin' && S.user;
+  if(isExpired(d) && !staffEntry){ app.innerHTML=`<div class="card sv"><h2>${label}</h2><p>${esc(d.title)}</p><p>ปิดรับแล้ว เนื่องจากเลยวันจัดกิจกรรมมาเกิน 3 วัน</p>${backLink(id)}</div>`; return; }
   if(!d.test[kind+'Open'] && !staffEntry){ app.innerHTML=`<div class="card sv"><h2>${label}</h2><p>${esc(d.title)}</p><p>แบบทดสอบนี้ยังไม่เปิดหรือปิดรับแล้ว</p>${backLink(id)}</div>`; return; }
   const Q=d.test.questions||[];
   if(!Q.length){ app.innerHTML=`<div class="card sv"><h2>${label}</h2><p>ยังไม่มีข้อสอบ</p>${backLink(id)}</div>`; return; }
@@ -793,6 +808,7 @@ async function renderSurvey(id){
   const [d, classes]=await Promise.all([S.store.getPublic(id), S.store.getClasses()]);
   if(!d){ app.innerHTML='<div class="card sv"><h2>ไม่พบแบบประเมิน</h2><p>ลิงก์อาจไม่ถูกต้อง กรุณาสแกน QR Code อีกครั้ง</p></div>'; return; }
   const staffEntry = MODE==='admin' && S.user;
+  if(isExpired(d) && !staffEntry){ app.innerHTML=`<div class="card sv"><h2>${esc(d.title)}</h2><p>แบบประเมินนี้ปิดรับแล้ว เนื่องจากเลยวันจัดกิจกรรมมาเกิน 3 วัน</p>${backLink(id)}</div>`; return; }
   if(!d.sat.open && !staffEntry){ app.innerHTML=`<div class="card sv"><h2>${esc(d.title)}</h2><p>แบบประเมินนี้ปิดรับคำตอบแล้ว ขอบคุณที่ให้ความสนใจ</p>${backLink(id)}</div>`; return; }
   let qi=0;
   const saved=staffEntry?{}:savedInfo();
@@ -1053,7 +1069,7 @@ async function renderHome(){
     <div class="card">
       <div class="row" style="margin-bottom:10px">
         <input type="search" id="q" placeholder="ค้นหาชื่อโครงการ / สถานที่ / ผู้รับผิดชอบ" style="flex:1;min-width:220px">
-        <label style="margin:0;font-weight:400;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mine" ${isAdmin()?'':'checked'}> เฉพาะโครงการของฉัน</label>
+        <label style="margin:0;font-weight:400;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mine"> เฉพาะโครงการของฉัน</label>
       </div>
       <div id="list" style="overflow-x:auto"></div>
     </div>`;
@@ -1071,9 +1087,9 @@ async function renderHome(){
       <div class="stat"><div class="k">ใช้จ่ายจริง</div><div class="v">${money(bs)}</div><div class="s">ร้อยละ ${f2(pct(bs,bp))} ของงบที่ได้รับ</div></div>
       <div class="stat"><div class="k">เปิดให้ผู้เรียนทำแบบทดสอบ/ประเมิน</div><div class="v">${openCount}</div><div class="s">โครงการ</div></div>`;
     $('#list').innerHTML = rows.length ? `<table class="t"><thead><tr><th>โครงการ</th><th>ปีงบ</th><th>วันที่</th><th>ผู้รับผิดชอบ</th><th class="num">งบประมาณ (บาท)</th><th class="c">เปิดรับ</th></tr></thead><tbody>
-      ${rows.map(p=>`<tr class="link" data-id="${esc(p.id)}"><td><b>${esc(p.name)}</b><div class="muted small">${esc(p.location||'')}</div></td>
+      ${rows.map(p=>`<tr class="link ${isExpired({closeAt:closeAtOf(p)})?'expired':''}" data-id="${esc(p.id)}"><td><b>${esc(p.name)}</b><div class="muted small">${esc(p.location||'')}</div></td>
         <td class="small">${esc(p.fiscalYear||'')}</td><td class="small">${esc(thDate(p.startDate))}</td><td class="small">${esc(p.responsible||p.ownerName||'')}</td>
-        <td class="num">${money(p.budgetPlanned)}</td><td class="c small">${[p.test?.preOpen&&'ก่อน',p.test?.postOpen&&'หลัง',p.surveyOpen!==false&&'ประเมิน'].filter(Boolean).map(x=>`<span class="pill">${x}</span>`).join(' ')||'<span class="pill off">ปิด</span>'}</td></tr>`).join('')}
+        <td class="num">${money(p.budgetPlanned)}</td><td class="c small">${isExpired({closeAt:closeAtOf(p)})?'<span class="pill gray">ปิดรับอัตโนมัติ</span>':[p.test?.preOpen&&'ก่อน',p.test?.postOpen&&'หลัง',p.surveyOpen!==false&&'ประเมิน'].filter(Boolean).map(x=>`<span class="pill">${x}</span>`).join(' ')||'<span class="pill off">ปิด</span>'}</td></tr>`).join('')}
       </tbody></table>` : `<div class="empty">ยังไม่มีโครงการ${q||fy||mine?'ที่ตรงกับเงื่อนไข':''}<br><br><a class="btn" href="#new">+ สร้างโครงการ</a></div>`;
     $$('#list tr.link').forEach(tr=>tr.onclick=()=>location.hash='p-'+tr.dataset.id);
   };
@@ -1101,7 +1117,7 @@ async function renderEdit(id){
     <fieldset><legend>ข้อมูลโครงการ</legend>
       <label>ชื่อโครงการ *</label><input type="text" name="name" value="${v('name')}" required placeholder="เช่น โครงการอบรมอาชีพการทำไม้กวาดดอกหญ้า">
       <div class="grid g2">
-        <div><label>ปีงบประมาณ</label><div class="row" style="flex-wrap:nowrap;gap:6px"><select name="fiscalYear" id="fySel">${fyOptions(years, p.fiscalYear)}</select>${isAdmin()?'<button type="button" class="btn ghost sm" id="addY" title="เพิ่มปีงบประมาณ" style="white-space:nowrap">+ ปี</button>':''}</div></div>
+        <div><label>ปีงบประมาณ</label><div class="row" style="flex-wrap:nowrap;gap:6px"><select name="fiscalYear" id="fySel">${fyOptions(years, p.fiscalYear)}</select>${S.user?'<button type="button" class="btn ghost sm" id="addY" title="เพิ่มปีงบประมาณ" style="white-space:nowrap">+ ปี</button>':''}</div></div>
         <div><label>ผู้รับผิดชอบโครงการ</label><input type="text" name="responsible" value="${v('responsible')}" placeholder="ชื่อ-สกุล"></div>
         <div><label>ตำแหน่งผู้รับผิดชอบ</label><input type="text" name="responsiblePos" value="${v('responsiblePos')}"></div>
       </div>
@@ -1260,7 +1276,7 @@ async function addYear(years){
 }
 function yearPills(years, sel, all=true){
   return `<div class="tabs" id="fyTabs">${all?`<button type="button" class="btn sm ${sel===''?'':'ghost'}" data-y="">ทุกปี</button>`:''}${years.map(y=>`<button type="button" class="btn sm ${sel===y?'':'ghost'}" data-y="${esc(y)}">ปีงบประมาณ ${esc(y)}${fyTag(y)}</button>`).join('')}
-    ${isAdmin()?'<button type="button" class="btn ghost sm" id="addY" style="border-style:dashed">+ ปีงบประมาณ</button>':''}</div>`;
+    ${S.user?'<button type="button" class="btn ghost sm" id="addY" style="border-style:dashed">+ ปีงบประมาณ</button>':''}</div>`;
 }
 function distTable(title, rows, total){
   return `<div><h3 style="font-size:16px;margin:0 0 6px">${esc(title)}</h3><table class="t"><thead><tr><th>${esc(title)}</th><th class="num">จำนวน</th><th class="num">ร้อยละ</th></tr></thead><tbody>
@@ -1293,6 +1309,7 @@ async function renderProject(id, keep=false){
       <div class="stat"><div class="k">งบประมาณใช้จริง</div><div class="v">${money(p.budgetSpent)}</div><div class="s">จาก ${money(p.budgetPlanned)} บาท (ร้อยละ ${f2(pct(num(p.budgetSpent),num(p.budgetPlanned)))})</div></div>
     </div>
 
+    ${isExpired({closeAt:closeAtOf(p)})?`<div class="note"><b>ปิดรับจากผู้เรียนอัตโนมัติแล้ว</b> เนื่องจากเลยวันจัดกิจกรรมมาเกิน 3 วัน (ปิดเมื่อ ${new Date(closeAtOf(p)).toLocaleDateString('th-TH',{day:'numeric',month:'long',year:'numeric'})}) — ครูและแอดมินยังบันทึกผลจากกระดาษ แก้ไข และออกรายงานได้ตามปกติ ถ้าต้องการเปิดให้ผู้เรียนอีก ให้แก้วันสิ้นสุดของโครงการ</div>`:''}
     <div class="card">
       <h2>QR Code สำหรับผู้เรียน</h2>
       <div class="qr">
