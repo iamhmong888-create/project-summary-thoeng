@@ -175,3 +175,8 @@ header.top .brand.brand-lg small{margin-top:0}
 header.top .brand.brand-lg{flex:1 1 0;min-width:0}
 @media (max-width:600px){header.top .brand.brand-lg{font-size:18px}header.top .brand.brand-lg small{font-size:12.5px}}
 @media (max-width:420px){header.top .brand.brand-lg{font-size:16.5px}header.top img.logo{width:40px;height:40px}}
+.pwwrap{position:relative}
+.pwwrap input{padding-right:48px}
+.pwwrap .eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:0;background:none;font-size:20px;cursor:pointer;padding:6px 10px;border-radius:8px}
+.pwwrap .eye:hover{background:var(--acc2)}
+.donetag{background:#f2c230;color:#3a2e00;font-size:13px;font-weight:700;padding:3px 10px;border-radius:99px;white-space:nowrap}
