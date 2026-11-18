@@ -615,6 +615,7 @@ window.addEventListener('hashchange',()=>S.ready&&route());
 function drawHeader(){
   const h=$('#hdr'); if(!h) return;
   const org=S.settings.org;
+  h.classList.toggle('glow', MODE==='learner');
   if(MODE==='learner'){
     h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand brand-lg"><span class="shine"><span class="shine-text">${esc(org)}</span></span><small>แบบทดสอบและแบบประเมินสำหรับผู้เรียน</small></div>`;
     return;
@@ -666,13 +667,10 @@ async function renderLearnerHome(){
   app.innerHTML=`
     <div class="lhero"><h1>สวัสดีครับ/ค่ะ ผู้เรียนทุกท่าน</h1><div>เลือกโครงการหรือกิจกรรมที่เข้าร่วม แล้วทำแบบทดสอบก่อนเรียน หลังเรียน และแบบประเมินความพึงพอใจ</div></div>
     ${!S.firebase?'<div class="note"><b>โหมดทดลอง:</b> ข้อมูลเก็บในเบราว์เซอร์เครื่องนี้เท่านั้น</div>':''}
-    <div id="mine"></div>
     <input type="search" id="lq" placeholder="🔍 ค้นหาชื่อโครงการ" style="margin-bottom:14px">
     <div class="lcards" id="lc"></div>`;
   const pills=d=>`${d.test.preOpen?'<span class="pill">ก่อนเรียน</span>':''}${d.test.postOpen?'<span class="pill">หลังเรียน</span>':''}${d.sat.open?'<span class="pill">ประเมินความพึงพอใจ</span>':''}`;
   const draw=()=>{
-    const info=savedInfo(); const last=list.find(d=>d.id===info.lastProject);
-    $('#mine').innerHTML=last?`<a class="bigbtn" href="#j-${esc(last.id)}" style="margin-bottom:16px"><span class="ic">📌</span><span>โครงการของฉัน: ${esc(last.title)}<small>${info.name?esc((info.prefix||'')+info.name)+' · ':''}แตะเพื่อทำแบบทดสอบหรือแบบประเมิน</small></span></a>`:'';
     const q=$('#lq').value.trim().toLowerCase();
     const rows=list.filter(d=>!q||d.title.toLowerCase().includes(q));
     $('#lc').innerHTML=rows.length?rows.map(d=>`<a class="lcard" href="#j-${esc(d.id)}"><b>${esc(d.title)}</b>

@@ -155,22 +155,26 @@ header.top{flex-wrap:wrap}
 .backbtn:hover{background:var(--acc);color:#fff}
 @media print{.backbtn{display:none}}
 
-/* ชื่อหน่วยงาน: แสงวิ่งนำ แล้วตัวอักษรค่อย ๆ ปรากฏตามแสง */
+/* ส่วนหัวหน้าผู้เรียน: แสงไฟแนวตั้งสไลด์ผ่านทั้งแถบ วนเป็นรอบ ๆ */
 header.top .brand.brand-lg{font-size:21px}
-.shine{position:relative;display:inline-block;overflow:hidden;padding:2px 4px 4px 0;vertical-align:top}
-.shine-text{display:inline-block;-webkit-mask-image:linear-gradient(90deg,#000 44%,transparent 56%);mask-image:linear-gradient(90deg,#000 44%,transparent 56%);
-  -webkit-mask-size:250% 100%;mask-size:250% 100%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
-  -webkit-mask-position:100% 0;mask-position:100% 0;animation:psReveal 2.2s cubic-bezier(.4,0,.2,1) .35s forwards}
-.shine::after{content:"";position:absolute;top:-20%;bottom:-20%;left:-45%;width:38%;pointer-events:none;
-  background:linear-gradient(100deg,transparent 0%,rgba(255,236,150,.0) 15%,rgba(255,240,170,.85) 50%,rgba(255,236,150,0) 85%,transparent 100%);
-  filter:blur(2px);transform:skewX(-18deg);animation:psSweep 2.2s cubic-bezier(.4,0,.2,1) .05s forwards, psSweepLoop 7s ease-in-out 4s infinite}
-@keyframes psReveal{to{-webkit-mask-position:0 0;mask-position:0 0}}
-@keyframes psSweep{from{left:-45%}to{left:115%}}
-@keyframes psSweepLoop{0%,70%{left:-45%;opacity:.0}72%{opacity:.7}100%{left:115%;opacity:.7}}
-@media (prefers-reduced-motion:reduce){.shine-text{animation:none;-webkit-mask-image:none;mask-image:none}.shine::after{display:none}}
-@media print{.shine::after{display:none}.shine-text{-webkit-mask-image:none;mask-image:none}}
+.shine{display:inline-block;padding:2px 4px 4px 0;vertical-align:top}
+header.top.glow{position:relative;overflow:hidden}
+/* แสงจาง ๆ เฉียง 45 องศา 3 เส้น วิ่งไล่ตามกัน */
+header.top.glow::after,header.top.glow::before{content:"";position:absolute;top:-20px;bottom:-20px;left:-300px;pointer-events:none;z-index:2;
+  transform:skewX(-45deg);animation:hdrBeam 5.5s cubic-bezier(.45,.05,.35,1) infinite}
+/* เส้นนำ (กว้าง จาง) + เส้นที่สอง (บาง สว่างกว่าเล็กน้อย) */
+header.top.glow::after{width:150px;
+  background:
+    linear-gradient(90deg,rgba(255,250,225,0) 0%,rgba(255,250,225,.22) 50%,rgba(255,250,225,0) 100%) 0 0/70px 100% no-repeat,
+    linear-gradient(90deg,rgba(255,250,225,0) 0%,rgba(255,250,225,.32) 50%,rgba(255,250,225,0) 100%) 110px 0/24px 100% no-repeat}
+/* เส้นที่สาม วิ่งตามมาช้ากว่าเล็กน้อย */
+header.top.glow::before{width:40px;animation-delay:.55s;
+  background:linear-gradient(90deg,rgba(255,250,225,0) 0%,rgba(255,250,225,.18) 50%,rgba(255,250,225,0) 100%)}
+@keyframes hdrBeam{0%{left:-300px;opacity:0}8%{opacity:1}62%{opacity:1}75%,100%{left:calc(100% + 200px);opacity:0}}
+@media (prefers-reduced-motion:reduce){header.top.glow::after,header.top.glow::before{display:none}}
+@media print{header.top.glow::after,header.top.glow::before{display:none}}
 header.top .brand.brand-lg{line-height:1.45}
-header.top .brand.brand-lg .shine{display:block;padding:3px 6px 1px 0}
+header.top .brand.brand-lg .shine{display:table;padding:3px 6px 1px 0}
 header.top .brand.brand-lg small{margin-top:0}
 header.top .brand.brand-lg{flex:1 1 0;min-width:0}
 @media (max-width:600px){header.top .brand.brand-lg{font-size:18px}header.top .brand.brand-lg small{font-size:12.5px}}
