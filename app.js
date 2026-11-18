@@ -604,7 +604,7 @@ function drawHeader(){
   const h=$('#hdr'); if(!h) return;
   const org=S.settings.org;
   if(MODE==='learner'){
-    h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand">${esc(org)}<small>แบบทดสอบและแบบประเมินสำหรับผู้เรียน</small></div>`;
+    h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand brand-lg"><span class="shine"><span class="shine-text">${esc(org)}</span></span><small>แบบทดสอบและแบบประเมินสำหรับผู้เรียน</small></div>`;
     return;
   }
   h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand">ระบบสรุปผลการดำเนินโครงการ<small>${esc(org)}</small></div>

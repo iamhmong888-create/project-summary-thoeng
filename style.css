@@ -8,8 +8,8 @@ html,body{margin:0}
 body{font-family:'Sarabun',system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:16px;line-height:1.55}
 a{color:var(--acc)}
 header.top{background:var(--acc);color:#fff;padding:12px 20px;display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center}
-header.top .brand{font-weight:700;font-size:18px;line-height:1.2}
-header.top .brand small{display:block;font-weight:400;opacity:.85;font-size:13px}
+header.top .brand{font-weight:700;font-size:18px;line-height:1.55}
+header.top .brand small{display:block;font-weight:400;opacity:.88;font-size:13px;line-height:1.6;margin-top:2px}
 header.top nav{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap;align-items:center}
 header.top nav a,header.top nav button{color:#fff;text-decoration:none;padding:6px 12px;border-radius:8px;font:inherit;font-size:15px;background:none;border:0;cursor:pointer}
 header.top nav a:hover,header.top nav button:hover{background:rgba(255,255,255,.15)}
@@ -132,6 +132,10 @@ table.t tr.link:hover td{background:#f7faf8}
 .bigbtn .ic{font-size:30px;line-height:1}
 .bigbtn small{display:block;font-weight:400;font-size:14px;color:var(--muted)}
 .bigbtn:hover{border-color:var(--acc)}
+.bigbtn:not(.off){background:var(--acc);border:3px solid #f2c230;color:#fff;box-shadow:0 3px 10px rgba(31,111,92,.25)}
+.bigbtn:not(.off) small{color:#e6f3ee}
+.bigbtn:not(.off):hover{filter:brightness(1.1);border-color:#ffd54a;transform:translateY(-1px)}
+.bigbtn:not(.off) .ic{filter:drop-shadow(0 1px 2px rgba(0,0,0,.25))}
 .bigbtn.off{opacity:.55;pointer-events:none}
 .opts{display:grid;gap:6px}
 .opts input{display:none}
@@ -150,3 +154,24 @@ header.top{flex-wrap:wrap}
 .backbtn{display:inline-flex;align-items:center;gap:6px;background:#fff;color:var(--acc);border:2px solid var(--acc);border-radius:10px;padding:8px 18px;font-size:17px;font-weight:600;text-decoration:none;box-shadow:0 1px 4px rgba(0,0,0,.06)}
 .backbtn:hover{background:var(--acc);color:#fff}
 @media print{.backbtn{display:none}}
+
+/* ชื่อหน่วยงาน: แสงวิ่งนำ แล้วตัวอักษรค่อย ๆ ปรากฏตามแสง */
+header.top .brand.brand-lg{font-size:21px}
+.shine{position:relative;display:inline-block;overflow:hidden;padding:2px 4px 4px 0;vertical-align:top}
+.shine-text{display:inline-block;-webkit-mask-image:linear-gradient(90deg,#000 44%,transparent 56%);mask-image:linear-gradient(90deg,#000 44%,transparent 56%);
+  -webkit-mask-size:250% 100%;mask-size:250% 100%;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
+  -webkit-mask-position:100% 0;mask-position:100% 0;animation:psReveal 2.2s cubic-bezier(.4,0,.2,1) .35s forwards}
+.shine::after{content:"";position:absolute;top:-20%;bottom:-20%;left:-45%;width:38%;pointer-events:none;
+  background:linear-gradient(100deg,transparent 0%,rgba(255,236,150,.0) 15%,rgba(255,240,170,.85) 50%,rgba(255,236,150,0) 85%,transparent 100%);
+  filter:blur(2px);transform:skewX(-18deg);animation:psSweep 2.2s cubic-bezier(.4,0,.2,1) .05s forwards, psSweepLoop 7s ease-in-out 4s infinite}
+@keyframes psReveal{to{-webkit-mask-position:0 0;mask-position:0 0}}
+@keyframes psSweep{from{left:-45%}to{left:115%}}
+@keyframes psSweepLoop{0%,70%{left:-45%;opacity:.0}72%{opacity:.7}100%{left:115%;opacity:.7}}
+@media (prefers-reduced-motion:reduce){.shine-text{animation:none;-webkit-mask-image:none;mask-image:none}.shine::after{display:none}}
+@media print{.shine::after{display:none}.shine-text{-webkit-mask-image:none;mask-image:none}}
+header.top .brand.brand-lg{line-height:1.45}
+header.top .brand.brand-lg .shine{display:block;padding:3px 6px 1px 0}
+header.top .brand.brand-lg small{margin-top:0}
+header.top .brand.brand-lg{flex:1 1 0;min-width:0}
+@media (max-width:600px){header.top .brand.brand-lg{font-size:18px}header.top .brand.brand-lg small{font-size:12.5px}}
+@media (max-width:420px){header.top .brand.brand-lg{font-size:16.5px}header.top img.logo{width:40px;height:40px}}
