@@ -556,16 +556,17 @@ function computeStats(p, resps){
     gender:dist('gender',GENDERS), age:dist('age',AGES), level:dist('level',EDU_LEVELS), room:dist('room',[]),
     comments:resps.map(r=>(r.comment||'').trim()).filter(Boolean) };
 }
+const learnerKey=r=>r.sid?'id:'+String(r.sid).replace(/\s/g,''):'n:'+nameKey(r.name);
 function testStats(p, rows){
   const Q=p.test?.questions||[], N=Q.length, cut=num(p.test?.passPct)||60;
   const sc=r=>Q.reduce((s,q,i)=>s+((r.answers||[])[i]===q.ans?1:0),0);
-  const lk=r=>r.sid?'id:'+String(r.sid).replace(/\s/g,''):'n:'+nameKey(r.name);
+  const lk=learnerKey;
   const latest=k=>{ const m=new Map(); rows.filter(r=>r.kind===k).sort((a,b)=>a.at-b.at).forEach(r=>m.set(lk(r),{...r,score:sc(r)})); return [...m.values()]; };
   const pre=latest('pre'), post=latest('post');
   const sum=a=>{ const s=msd(a.map(x=>x.score)); const pass=a.filter(x=>N&&pct(x.score,N)>=cut).length; return {...s,pm:pct(s.mean,N),pass,passP:pct(pass,a.length)}; };
   const preM=new Map(pre.map(x=>[lk(x),x])), postM=new Map(post.map(x=>[lk(x),x]));
   const keys=[...new Set([...preM.keys(),...postM.keys()])];
-  const learners=keys.map(k=>{ const a=preM.get(k), b=postM.get(k), x=b||a; return {name:x.name, sid:x.sid||'', room:x.room||'', level:x.level||'', pre:a?a.score:null, post:b?b.score:null}; })
+  const learners=keys.map(k=>{ const a=preM.get(k), b=postM.get(k), x=b||a; return {key:k, name:x.name, sid:x.sid||'', room:x.room||'', level:x.level||'', pre:a?a.score:null, post:b?b.score:null}; })
     .sort((a,b)=>(a.room||'').localeCompare(b.room||'','th')||String(a.sid).localeCompare(String(b.sid)));
   const roomNames=[...new Set(learners.map(l=>l.room||'ไม่ระบุ'))];
   const rooms=roomNames.map(r=>{ const L=learners.filter(l=>(l.room||'ไม่ระบุ')===r); const a=msd(L.filter(l=>l.pre!=null).map(l=>l.pre)), b=msd(L.filter(l=>l.post!=null).map(l=>l.post));
@@ -1351,9 +1352,9 @@ async function renderProject(id, keep=false){
         ${ts.pairs.length?`<tr class="tot"><td>ผลต่าง (ทำครบ 2 ครั้ง ${ts.pairs.length} คน)</td><td></td><td class="num">${ts.diff.mean>=0?'+':''}${f2(ts.diff.mean)}</td><td></td><td class="num">${ts.diff.mean>=0?'+':''}${f2(pct(ts.diff.mean,ts.N))}</td><td class="num">คะแนนเพิ่ม ${ts.improved} คน</td></tr>`:''}
       </tbody></table>
       <details style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">คะแนนรายบุคคล (${ts.learners.length} คน)</summary>
-        <table class="t"><thead><tr><th class="c">ที่</th><th>รหัส</th><th>ชื่อ-สกุล</th><th>ห้องเรียน</th><th class="num">ก่อนเรียน</th><th class="num">หลังเรียน</th><th class="num">ผลต่าง</th><th>ผล</th></tr></thead><tbody>
+        <table class="t"><thead><tr><th class="c">ที่</th><th>รหัส</th><th>ชื่อ-สกุล</th><th>ห้องเรียน</th><th class="num">ก่อนเรียน</th><th class="num">หลังเรียน</th><th class="num">ผลต่าง</th><th>ผล</th><th></th></tr></thead><tbody>
         ${ts.learners.map((l,i)=>{ const d=l.pre!=null&&l.post!=null?l.post-l.pre:null; const pass=l.post!=null&&pct(l.post,ts.N)>=ts.cut;
-          return `<tr><td class="c">${i+1}</td><td class="small">${esc(l.sid)}</td><td>${esc(l.name)}</td><td class="small">${esc(l.room)}</td><td class="num">${l.pre??'-'}</td><td class="num">${l.post??'-'}</td><td class="num">${d==null?'-':(d>0?'+':'')+d}</td><td>${l.post==null?'<span class="muted">ยังไม่ทำหลังเรียน</span>':pass?'<span class="pill">ผ่าน</span>':'<span class="pill off">ไม่ผ่าน</span>'}</td></tr>`; }).join('')}
+          return `<tr><td class="c">${i+1}</td><td class="small">${esc(l.sid)}</td><td>${esc(l.name)}</td><td class="small">${esc(l.room)}</td><td class="num">${l.pre??'-'}</td><td class="num">${l.post??'-'}</td><td class="num">${d==null?'-':(d>0?'+':'')+d}</td><td>${l.post==null?'<span class="muted">ยังไม่ทำหลังเรียน</span>':pass?'<span class="pill">ผ่าน</span>':'<span class="pill off">ไม่ผ่าน</span>'}</td><td class="num"><button class="btn ghost danger sm dell" data-k="${esc(l.key)}" data-n="${esc(l.name)}">ลบ</button></td></tr>`; }).join('')}
         </tbody></table></details>
       ${ts.rooms.length>1?`<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">สรุปรายห้องเรียน (${ts.rooms.length})</summary>
         <table class="t"><thead><tr><th>ห้องเรียน</th><th class="num">ก่อนเรียน (คน)</th><th class="num">x̄ ก่อน</th><th class="num">หลังเรียน (คน)</th><th class="num">x̄ หลัง</th></tr></thead><tbody>
@@ -1411,7 +1412,26 @@ async function renderProject(id, keep=false){
     await S.store.saveProject(p); renderProject(id,true);
   });
   $('#delP').onclick=async()=>{ if(await ask(`ลบ "${p.name}" รวมทั้งแบบทดสอบ แบบประเมิน และภาพทั้งหมด? ลบแล้วกู้คืนไม่ได้`,'ลบโครงการ')){ await S.store.deleteProject(id); toast('ลบแล้ว'); location.hash='home'; } };
-  $$('.delr').forEach(b=>b.onclick=async()=>{ if(await ask('ลบคำตอบของผู้ตอบรายนี้?','ลบ')){ await S.store.deleteResponse(id,b.dataset.id); renderProject(id,true); } });
+  // ลบผู้เรียน: ถามต่อว่าจะลบข้อมูลของคนเดียวกันในอีกส่วนด้วยหรือไม่ (จับคู่จากชื่อ หรือรหัสนักศึกษา)
+  const sameName=(a,b)=>nameKey(a)===nameKey(b);
+  $$('.delr').forEach(b=>b.onclick=async()=>{
+    const r=resps.find(x=>x.id===b.dataset.id); if(!r) return;
+    if(!await ask(`ลบแบบประเมินความพึงพอใจของ ${r.name}?`,'ลบ')) return;
+    await S.store.deleteResponse(id,r.id);
+    const rel=trows.filter(t=>sameName(t.name,r.name));
+    if(rel.length && await ask(`${r.name} มีผลแบบทดสอบก่อน/หลังเรียนอีก ${rel.length} รายการ ลบด้วยหรือไม่?`,'ลบด้วย'))
+      for(const t of rel) await S.store.deleteTest(id,t.id);
+    renderProject(id,true);
+  });
+  $$('.dell').forEach(b=>b.onclick=async()=>{
+    const rel=trows.filter(t=>learnerKey(t)===b.dataset.k), name=b.dataset.n;
+    if(!await ask(`ลบผลแบบทดสอบทั้งก่อนเรียนและหลังเรียนของ ${name} (${rel.length} รายการ)?`,'ลบ')) return;
+    for(const t of rel) await S.store.deleteTest(id,t.id);
+    const relS=resps.filter(x=>sameName(x.name,name)||rel.some(t=>sameName(t.name,x.name)));
+    if(relS.length && await ask(`${name} มีแบบประเมินความพึงพอใจอีก ${relS.length} รายการ ลบด้วยหรือไม่?`,'ลบด้วย'))
+      for(const x of relS) await S.store.deleteResponse(id,x.id);
+    renderProject(id,true);
+  });
   $$('.delt').forEach(b=>b.onclick=async()=>{ if(await ask('ลบผลการทดสอบรายการนี้?','ลบ')){ await S.store.deleteTest(id,b.dataset.id); renderProject(id,true); } });
   $('#phIn').onchange=async e=>{
     const files=[...e.target.files]; if(!files.length) return; toast('กำลังเพิ่มภาพ…');
@@ -1728,7 +1748,7 @@ async function reportToDocx(B, filename){
         out.push(new D.Table({width:{size:CW,type:D.WidthType.DXA},columnWidths:[CW/2,CW/2],rows,
           borders:{top:none,bottom:none,left:none,right:none,insideHorizontal:none,insideVertical:none}}));
         break; }
-      case 'sign': out.push(P([R('')])); b.lines.forEach(l=>out.push(P([R(l)],{align:D.AlignmentType.CENTER,left:3400}))); break;
+      case 'sign': out.push(P([R('')])); b.lines.forEach(l=>out.push(P([R(l)],{align:D.AlignmentType.CENTER,left:2000}))); break;
     }
   }
   const doc=new D.Document({

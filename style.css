@@ -209,3 +209,4 @@ table.t tr.expired td{background:#f1f2f1;color:#8a8f8c}
 .menubar a.on::after{content:"";position:absolute;left:14px;right:14px;bottom:4px;height:3px;background:#f2c230;border-radius:3px}
 @media (max-width:600px){.menubar a{font-size:14.5px;padding:10px 11px}.menubar .mbin{flex-wrap:nowrap}}
 @media print{.menubar{display:none}}
+.paper .rp-sign{margin-left:28%;white-space:nowrap}
