@@ -1,13 +1,12 @@
 /* =====================================================================
-   ตั้งค่า Firebase — วาง firebaseConfig ของโปรเจกต์ที่นี่ (ไฟล์เดียวที่ต้องแก้)
-   ถ้าปล่อยเป็น null ระบบจะทำงานใน "โหมดทดลอง" (เก็บข้อมูลในเบราว์เซอร์เครื่องนี้เท่านั้น)
+   ตั้งค่า Firebase — โปรเจกต์ project-summary-2e6bf
    ===================================================================== */
 window.FIREBASE_CONFIG = {
-  apiKey: "AIza...",
-  authDomain: "xxx.firebaseapp.com",
-  projectId: "xxx",
-  storageBucket: "xxx.appspot.com",
-  messagingSenderId: "...",
-  appId: "..."
+  apiKey: "AIzaSyDrqcYVG9nif9uGnnbpBoq-cPSXYNJ9jtc",
+  authDomain: "project-summary-2e6bf.firebaseapp.com",
+  projectId: "project-summary-2e6bf",
+  storageBucket: "project-summary-2e6bf.firebasestorage.app",
+  messagingSenderId: "839878981891",
+  appId: "1:839878981891:web:8d40ae56d4add1e2fe5136",
+  measurementId: "G-MJKSZF6FH0"
 };
-*/
