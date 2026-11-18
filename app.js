@@ -136,6 +136,19 @@ function parseTest(text){
   });
   return {questions:qs, errors};
 }
+/* การสลับลำดับข้อ: คำตอบยังบันทึกตามลำดับข้อเดิมเสมอ จึงคิดคะแนนและเปรียบเทียบได้ตามปกติ */
+function seededRng(str){ let h=1779033703^str.length; for(let i=0;i<str.length;i++){ h=Math.imul(h^str.charCodeAt(i),3432918353); h=h<<13|h>>>19; }
+  let s=h>>>0; return ()=>{ s|=0; s=s+0x6D2B79F5|0; let t=Math.imul(s^s>>>15,1|s); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+function shuffledIdx(n, rnd){ const a=[...Array(n).keys()]; for(let i=n-1;i>0;i--){ const j=Math.floor(rnd()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+const SHUFFLE_MODES = {none:'ไม่สลับ (ก่อนเรียนและหลังเรียนลำดับเดียวกัน)', post:'สลับข้อในแบบทดสอบหลังเรียน (ทุกคนได้ลำดับเดียวกัน ใช้พิมพ์ลงกระดาษได้)', random:'สุ่มลำดับข้อทุกครั้ง (ผู้เรียนแต่ละคนได้ลำดับต่างกัน)'};
+function testLayout(id, kind, test, staff){
+  const Q=test.questions||[]; const mode=test.shuffle||'none'; let rnd=null;
+  if(mode==='post' && kind==='post') rnd=seededRng(id+':post');
+  else if(mode==='random' && !staff) rnd=Math.random;
+  const qOrder = rnd ? shuffledIdx(Q.length,rnd) : [...Q.keys()];
+  const optOrders = Q.map(q=> rnd && test.shuffleOpt ? shuffledIdx(q.opts.length,rnd) : [...q.opts.keys()]);
+  return {qOrder, optOrders};
+}
 function testToText(qs){ return (qs||[]).map((q,i)=>`${i+1}. ${q.q}\n`+q.opts.map((o,j)=>`${j===q.ans?'*':''}${OPT_LABELS[j]||j+1}. ${o}`).join('\n')).join('\n\n'); }
 
 function toast(msg){ const t=$('#toast'); if(!t) return; t.textContent=msg; t.classList.add('on'); clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('on'),2800); }
@@ -230,7 +243,8 @@ function publicDoc(p, settings){
   const t=p.test||{}; const qs=t.questions||[];
   const sat={open:p.surveyOpen!==false, items:p.items||[]};
   const test={ questions:qs.map(q=>({q:q.q,opts:q.opts})), key:t.showScore!==false?qs.map(q=>q.ans):null,
-    preOpen:!!t.preOpen&&qs.length>0, postOpen:!!t.postOpen&&qs.length>0, passPct:num(t.passPct)||60 };
+    preOpen:!!t.preOpen&&qs.length>0, postOpen:!!t.postOpen&&qs.length>0, passPct:num(t.passPct)||60,
+    shuffle:t.shuffle||'none', shuffleOpt:!!t.shuffleOpt };
   return { title:p.name||'', org:settings?.org||'', dateText:dateRange(p), location:p.location||'',
     responsible:p.responsible||'', active:sat.open||test.preOpen||test.postOpen, sat, test, updatedAt:Date.now() };
 }
@@ -713,8 +727,9 @@ async function renderTest(id, kind){
     <h3>ข้อมูลผู้เรียน</h3>
     ${learnerFields(classes, staffEntry?{}:savedInfo(), {sid:true})}
     <h3>คำถาม</h3>
-    ${Q.map((q,i)=>`<div class="q" data-req="a${i}"><div class="qt">${i+1}. ${esc(q.q)}</div><div class="opts">
-      ${q.opts.map((o,j)=>`<input type="radio" name="a${i}" id="a${i}_${j}" value="${j}"><label for="a${i}_${j}"><i>${OPT_LABELS[j]||j+1}.</i><span>${esc(o)}</span></label>`).join('')}</div></div>`).join('')}
+    ${(()=>{ const L=testLayout(id,kind,d.test,staffEntry); return L.qOrder.map((i,k)=>{ const q=Q[i];
+      return `<div class="q" data-req="a${i}"><div class="qt">${k+1}. ${esc(q.q)}</div><div class="opts">
+      ${L.optOrders[i].map((j,m)=>`<input type="radio" name="a${i}" id="a${i}_${j}" value="${j}"><label for="a${i}_${j}"><i>${OPT_LABELS[m]||m+1}.</i><span>${esc(q.opts[j])}</span></label>`).join('')}</div></div>`; }).join(''); })()}
     <div class="row" style="margin:16px 0"><button class="btn" id="tbtn" style="font-size:17px;padding:10px 26px">ส่งคำตอบ</button><span class="err" id="terr"></span></div>
   </form>`;
   const f=$('#tf'); bindLearnerFields(f);
@@ -1039,8 +1054,8 @@ async function renderTestEditor(id){
   const t=p.test||{questions:[],preOpen:true,postOpen:false,showScore:true,passPct:60};
   const hasRows=(await S.store.listTests(id)).length>0;
   app.innerHTML=`<div class="row" style="margin-bottom:6px"><a href="#p-${esc(id)}" class="backbtn">← กลับไปหน้าโครงการ</a></div>
-    <h1>แบบทดสอบก่อนเรียน-หลังเรียน</h1><p class="muted">ใช้ข้อสอบชุดเดียวกันทั้งก่อนเรียนและหลังเรียน เพื่อเปรียบเทียบพัฒนาการ</p>
-    ${hasRows?'<div class="note">มีผู้เรียนทำแบบทดสอบแล้ว ถ้าเพิ่ม ลบ หรือสลับลำดับข้อ คะแนนเดิมจะคำนวณผิด ควรแก้เฉพาะถ้อยคำหรือเฉลยเท่านั้น</div>':''}
+    <h1>แบบทดสอบก่อนเรียน-หลังเรียน</h1><p class="muted">ใส่ข้อสอบชุดเดียว ใช้ทั้งก่อนเรียนและหลังเรียน และเลือกให้ระบบสลับลำดับข้อในหลังเรียนได้ (ตั้งค่าด้านล่างช่องข้อสอบ)</p>
+    ${hasRows?'<div class="note">มีผู้เรียนทำแบบทดสอบแล้ว ถ้าเพิ่ม ลบ หรือย้ายข้อในช่องข้อสอบ คะแนนเดิมจะคำนวณผิด ควรแก้เฉพาะถ้อยคำหรือเฉลยเท่านั้น (การเปลี่ยนตัวเลือก "สลับลำดับข้อ" ทำได้ ไม่กระทบคะแนน)</div>':''}
     <div class="grid g2" style="align-items:start">
       <div class="card"><h2>พิมพ์หรือวางข้อสอบ</h2>
         <p class="muted small" style="margin-top:-6px">บรรทัดคำถาม แล้วตามด้วยตัวเลือก ก. ข. ค. ง. บรรทัดละตัวเลือก <b>ใส่ * หน้าตัวเลือกที่ถูก</b> คัดลอกจาก Word มาวางได้</p>
@@ -1050,24 +1065,46 @@ async function renderTestEditor(id){
         <label style="display:flex;gap:8px;align-items:center;font-weight:400"><input type="checkbox" id="pre" ${t.preOpen?'checked':''}> เปิดรับแบบทดสอบก่อนเรียน</label>
         <label style="display:flex;gap:8px;align-items:center;font-weight:400;margin-top:4px"><input type="checkbox" id="post" ${t.postOpen?'checked':''}> เปิดรับแบบทดสอบหลังเรียน</label>
         <label style="display:flex;gap:8px;align-items:center;font-weight:400;margin-top:4px"><input type="checkbox" id="show" ${t.showScore!==false?'checked':''}> แสดงคะแนนให้ผู้เรียนเห็นทันทีหลังส่ง</label>
+        <label>การสลับลำดับข้อ</label>
+        <select id="shf">${Object.entries(SHUFFLE_MODES).map(([k,v])=>`<option value="${k}" ${(t.shuffle||'none')===k?'selected':''}>${v}</option>`).join('')}</select>
+        <label style="display:flex;gap:8px;align-items:center;font-weight:400;margin-top:6px"><input type="checkbox" id="shfo" ${t.shuffleOpt?'checked':''}> สลับตัวเลือก ก ข ค ง ด้วย</label>
+        <p class="muted small">ระบบตรวจคำตอบตามข้อเดิมเสมอ คะแนนก่อนและหลังเรียนจึงเปรียบเทียบกันได้ถูกต้อง แม้ลำดับที่ผู้เรียนเห็นจะต่างกัน</p>
         <p class="muted small">ถ้าแสดงคะแนนทันที เฉลยจะถูกส่งไปที่เครื่องผู้เรียนด้วย ผู้ที่ชำนาญคอมพิวเตอร์อาจเปิดดูเฉลยได้</p>
         <div class="row end" style="margin-top:10px"><a class="btn ghost" href="#p-${esc(id)}">ยกเลิก</a><button class="btn" id="sv">บันทึกแบบทดสอบ</button></div>
       </div>
-      <div class="card"><h2>ตัวอย่างที่ผู้เรียนจะเห็น <span class="muted small" id="cnt"></span></h2><div id="err"></div><div id="prev" class="sv"></div></div>
+      <div class="card"><h2>ตัวอย่างที่ผู้เรียนจะเห็น <span class="muted small" id="cnt"></span></h2>
+        <div class="row" style="margin-bottom:10px"><div class="tabs"><button type="button" class="btn sm" id="tbPre">ก่อนเรียน</button><button type="button" class="btn ghost sm" id="tbPost">หลังเรียน</button></div>
+          <span class="spacer"></span><button type="button" class="btn ghost sm" id="cpTest">คัดลอกข้อสอบไปพิมพ์ (ลำดับนี้)</button></div>
+        <div class="muted small" id="shNote" style="margin-bottom:8px"></div><div id="err"></div><div id="prev" class="sv"></div></div>
     </div>`;
+  let view='pre', layout=null;
   const draw=()=>{
     const {questions,errors}=parseTest($('#tx').value);
     $('#cnt').textContent=`(${questions.length} ข้อ)`;
     $('#err').innerHTML=errors.length?`<div class="note">${errors.slice(0,8).map(esc).join('<br>')}${errors.length>8?'<br>…':''}</div>`:'';
-    $('#prev').innerHTML=questions.map((q,i)=>`<div class="q"><div class="qt">${i+1}. ${esc(q.q)}</div>${q.opts.map((o,j)=>`<div class="${j===q.ans?'opt-ok':''}">${OPT_LABELS[j]||j+1}. ${esc(o)}${j===q.ans?' ✓':''}</div>`).join('')}</div>`).join('')||'<div class="empty">ยังไม่มีข้อสอบ</div>';
+    const mode=$('#shf').value;
+    layout=testLayout(id, view, {questions, shuffle:mode, shuffleOpt:$('#shfo').checked}, true);
+    $('#tbPre').className='btn sm'+(view==='pre'?'':' ghost'); $('#tbPost').className='btn sm'+(view==='post'?'':' ghost');
+    $('#shNote').textContent = mode==='random' ? 'โหมดสุ่ม: ผู้เรียนแต่ละคนจะเห็นลำดับต่างจากนี้ (ตัวอย่างนี้คือลำดับเดิม ใช้สำหรับพิมพ์และบันทึกจากกระดาษ)'
+      : mode==='post' && view==='post' ? 'ลำดับหลังเรียนที่สลับแล้ว ทุกคนเห็นเหมือนกัน (หน้าบันทึกจากกระดาษของครูก็ใช้ลำดับนี้)' : '';
+    $('#prev').innerHTML=layout.qOrder.map((i,k)=>{ const q=questions[i];
+      return `<div class="q"><div class="qt">${k+1}. ${esc(q.q)} ${i!==k?`<span class="muted small">(ข้อเดิม ${i+1})</span>`:''}</div>${layout.optOrders[i].map((j,m)=>`<div class="${j===q.ans?'opt-ok':''}">${OPT_LABELS[m]||m+1}. ${esc(q.opts[j])}${j===q.ans?' ✓':''}</div>`).join('')}</div>`; }).join('')||'<div class="empty">ยังไม่มีข้อสอบ</div>';
     return {questions,errors};
   };
-  $('#tx').oninput=draw; draw();
+  $('#tx').oninput=draw; $('#shf').onchange=draw; $('#shfo').onchange=draw; draw();
+  $('#tbPre').onclick=()=>{ view='pre'; draw(); }; $('#tbPost').onclick=()=>{ view='post'; draw(); };
+  $('#cpTest').onclick=()=>{
+    const {questions}=draw(); if(!questions.length) return;
+    const body=layout.qOrder.map((i,k)=>`${k+1}. ${questions[i].q}\n`+layout.optOrders[i].map((j,m)=>`    ${OPT_LABELS[m]||m+1}. ${questions[i].opts[j]}`).join('\n')).join('\n\n');
+    const key=layout.qOrder.map((i,k)=>`${k+1}.${OPT_LABELS[layout.optOrders[i].indexOf(questions[i].ans)]}`).join('  ');
+    copyText(`แบบทดสอบ${view==='pre'?'ก่อนเรียน':'หลังเรียน'}\n\n${body}\n\n----- เฉลย -----\n${key}`);
+  };
   $('#sample').onclick=()=>{ $('#tx').value=($('#tx').value.trim()?$('#tx').value.trim()+'\n\n':'')+TEST_SAMPLE; draw(); };
   $('#sv').onclick=async()=>{
     const {questions,errors}=draw();
     if(errors.length){ toast('กรุณาแก้ไขข้อสอบให้ถูกต้องก่อนบันทึก'); return; }
-    p.test={questions,preOpen:$('#pre').checked,postOpen:$('#post').checked,showScore:$('#show').checked,passPct:num($('#cut').value)||60};
+    p.test={questions,preOpen:$('#pre').checked,postOpen:$('#post').checked,showScore:$('#show').checked,passPct:num($('#cut').value)||60,
+      shuffle:$('#shf').value, shuffleOpt:$('#shfo').checked};
     await S.store.saveProject(p); toast('บันทึกแบบทดสอบแล้ว'); location.hash='p-'+id;
   };
 }
