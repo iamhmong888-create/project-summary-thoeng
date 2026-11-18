@@ -195,3 +195,17 @@ header.top .brand.brand-lg{flex:1 1 0;min-width:0}
 .pvpage{display:block;width:100%;max-width:794px;margin:0 auto 18px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,.14)}
 .pvpage.land{max-width:1123px}
 .pdfview:has(.land){max-width:1180px}
+.lcard.off{background:#eceeed;color:#888;border-color:#dcdfdd;cursor:not-allowed}
+.lcard.off b{color:#888}
+table.t tr.expired td{background:#f1f2f1;color:#8a8f8c}
+.pill.gray{background:#e3e5e4;color:#6b706d}
+/* แถบเมนูใต้ส่วนหัว (หน้าครู/แอดมิน) */
+.menubar{background:#185a4a;border-top:1px solid rgba(255,255,255,.12);box-shadow:0 2px 6px rgba(0,0,0,.08);position:sticky;top:0;z-index:20}
+.menubar .mbin{max-width:1080px;margin:0 auto;padding:0 8px;display:flex;flex-wrap:wrap;align-items:center;overflow-x:auto}
+.menubar a{position:relative;color:#fff;text-decoration:none;font-size:16px;font-weight:600;padding:11px 18px;white-space:nowrap}
+.menubar a+a::before{content:"";position:absolute;left:0;top:50%;transform:translateY(-50%);width:2px;height:20px;background:#f2c230;border-radius:2px}
+.menubar a:hover{background:rgba(255,255,255,.1)}
+.menubar a.on{color:#ffd54a}
+.menubar a.on::after{content:"";position:absolute;left:14px;right:14px;bottom:4px;height:3px;background:#f2c230;border-radius:3px}
+@media (max-width:600px){.menubar a{font-size:14.5px;padding:10px 11px}.menubar .mbin{flex-wrap:nowrap}}
+@media print{.menubar{display:none}}

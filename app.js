@@ -627,19 +627,31 @@ function drawHeader(){
   const h=$('#hdr'); if(!h) return;
   const org=S.settings.org;
   h.classList.toggle('glow', MODE==='learner');
+  let mb=$('#menubar');
+  if(!mb){ mb=document.createElement('nav'); mb.id='menubar'; mb.className='menubar'; h.after(mb); }
+  mb.innerHTML=''; mb.style.display='none';
   if(MODE==='learner'){
     h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand brand-lg"><span class="shine"><span class="shine-text">${esc(org)}</span></span><small>แบบทดสอบและแบบประเมินสำหรับผู้เรียน</small></div>`;
     return;
   }
   h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand">ระบบสรุปผลการดำเนินโครงการ<small>${esc(org)}</small></div>
-    <nav>${S.user?`<a href="#home">โครงการ</a><a href="#new">+ โครงการใหม่</a><a href="#summary">สรุปรายปี</a>${isAdmin()?'<a href="#staff">บุคลากร</a><a href="#rooms">ห้องเรียน</a><a href="#org">ตั้งค่าหน่วยงาน</a>':''}
-      <span class="who">👤 ${esc(S.user.name)}${isAdmin()?' (ผู้ดูแล)':''}</span><button id="logoutBtn">ออกจากระบบ</button>`:''}
+    <nav>${S.user?`<span class="who">👤 ${esc(S.user.name)}${isAdmin()?' (ผู้ดูแล)':''}</span><button id="logoutBtn">ออกจากระบบ</button>`:''}
       ${!S.firebase?'<span class="badge">โหมดทดลอง</span>':''}</nav>`;
+  if(S.user){
+    mb.innerHTML=`<div class="mbin"><a href="#home" data-v="home">โครงการ</a><a href="#new" data-v="new">+ โครงการใหม่</a><a href="#summary" data-v="summary">สรุปรายปี</a>${isAdmin()?'<a href="#staff" data-v="staff">บุคลากร</a><a href="#rooms" data-v="rooms">ห้องเรียน</a><a href="#org" data-v="org">ตั้งค่าหน่วยงาน</a>':''}</div>`;
+    mb.style.display=''; markMenu();
+  }
   if($('#logoutBtn')) $('#logoutBtn').onclick=async()=>{ await S.store.logout(); S.user=null; drawHeader(); location.hash='login'; route(); };
 }
 
+function markMenu(){
+  const v=(location.hash.slice(1).split('-')[0])||'home';
+  const map={p:'home',edit:'home',r:'home',test:'home',sumpdf:'summary'};
+  $$('#menubar a').forEach(a=>a.classList.toggle('on', a.dataset.v===(map[v]||v)));
+}
 async function route(){
   const h=decodeURIComponent(location.hash.slice(1));
+  markMenu();
   const i=h.indexOf('-'); const view=i<0?h:h.slice(0,i); const id=i<0?'':h.slice(i+1);
   if(S.unsub){ try{ S.unsub(); }catch(e){} S.unsub=null; }
   window.scrollTo(0,0);
