@@ -246,6 +246,7 @@ function closeAtOf(p){ const d=p.endDate||p.startDate; if(!d) return null; const
 const isExpired = x => !!(x && x.closeAt && Date.now()>x.closeAt);
 const createdOf = p => p.createdAt || p.updatedAt || 0;
 const byNewest = (a,b)=>createdOf(b)-createdOf(a);
+const photoOrder=(a,b)=>((a.order??1e12+a.at)-(b.order??1e12+b.at));
 function publicDoc(p, settings){
   const t=p.test||{}; const qs=t.questions||[];
   const sat={open:p.surveyOpen!==false, items:p.items||[]};
@@ -309,7 +310,7 @@ class LocalStore{
   async addTest(pid,r){ (this.mem.tests[pid] ||= {})[uid()]=r; this.persist(); }
   async listTests(pid){ return Object.entries(this.mem.tests[pid]||{}).map(([id,r])=>({id,...r})).sort((a,b)=>a.at-b.at); }
   async deleteTest(pid,rid){ delete (this.mem.tests[pid]||{})[rid]; this.persist(); }
-  async listPhotos(pid){ return Object.entries(this.mem.photos[pid]||{}).map(([id,r])=>({id,...r})).sort((a,b)=>a.at-b.at); }
+  async listPhotos(pid){ return Object.entries(this.mem.photos[pid]||{}).map(([id,r])=>({id,...r})).sort(photoOrder); }
   async addPhoto(pid,ph){ (this.mem.photos[pid] ||= {})[uid()]={...ph,at:Date.now()}; this.persist(); }
   async updatePhoto(pid,id,data){ Object.assign(this.mem.photos[pid][id],data); this.persist(); }
   async deletePhoto(pid,id){ delete this.mem.photos[pid][id]; this.persist(); }
@@ -421,7 +422,7 @@ class FireStore{
   async addTest(pid,r){ await this.P().doc(pid).collection('tests').add(r); }
   async listTests(pid){ const s=await this.P().doc(pid).collection('tests').orderBy('at').get(); return s.docs.map(d=>({id:d.id,...d.data()})); }
   async deleteTest(pid,rid){ await this.P().doc(pid).collection('tests').doc(rid).delete(); }
-  async listPhotos(pid){ const s=await this.P().doc(pid).collection('photos').orderBy('at').get(); return s.docs.map(d=>({id:d.id,...d.data()})); }
+  async listPhotos(pid){ const s=await this.P().doc(pid).collection('photos').get(); return s.docs.map(d=>({id:d.id,...d.data()})).sort(photoOrder); }
   async addPhoto(pid,ph){ await this.P().doc(pid).collection('photos').add({...ph,at:Date.now()}); }
   async updatePhoto(pid,id,data){ await this.P().doc(pid).collection('photos').doc(id).update(data); }
   async deletePhoto(pid,id){ await this.P().doc(pid).collection('photos').doc(id).delete(); }
@@ -1387,10 +1388,10 @@ async function renderProject(id, keep=false){
     <div class="card">
       <div class="row"><h2 style="margin:0">ภาพกิจกรรม (${photos.length})</h2><span class="spacer"></span>
         <label class="btn ghost sm" style="margin:0;font-weight:400">+ เพิ่มภาพ<input type="file" accept="image/*" multiple id="phIn" hidden></label></div>
-      <p class="muted small">ระบบย่อขนาดภาพให้อัตโนมัติ และจะนำภาพไปใส่ในภาคผนวกของรายงาน แนะนำโครงการละ 4–8 ภาพ</p>
-      <div class="photos" id="phs">${photos.map(ph=>`<figure data-id="${esc(ph.id)}"><img src="${ph.data}" alt="">
+      <p class="muted small">ระบบย่อขนาดภาพให้อัตโนมัติ และจะนำภาพไปใส่ในภาคผนวกของรายงานตามลำดับนี้ <b>คลิกค้างที่ภาพแล้วลากเพื่อสลับตำแหน่ง</b> (บนมือถือใช้ปุ่ม ◀ ▶) แนะนำโครงการละ 4–8 ภาพ</p>
+      <div class="photos" id="phs">${photos.map((ph,i)=>`<figure data-id="${esc(ph.id)}" draggable="true"><div class="phnum">${i+1}</div><img src="${ph.data}" alt="" draggable="false">
         <figcaption><input type="text" value="${esc(ph.caption||'')}" placeholder="คำบรรยายภาพ" class="cap">
-        <div class="row end" style="margin-top:4px"><button class="btn ghost danger sm delph">ลบภาพ</button></div></figcaption></figure>`).join('')}</div>
+        <div class="row" style="margin-top:4px;gap:4px"><button class="btn ghost sm mvph" data-d="-1" ${i?'':'disabled'} title="เลื่อนไปก่อนหน้า">◀</button><button class="btn ghost sm mvph" data-d="1" ${i<photos.length-1?'':'disabled'} title="เลื่อนไปถัดไป">▶</button><span class="spacer"></span><button class="btn ghost danger sm delph">ลบภาพ</button></div></figcaption></figure>`).join('')}</div>
     </div>
 
     <div class="card" style="overflow-x:auto">
@@ -1438,6 +1439,20 @@ async function renderProject(id, keep=false){
     for(const f of files){ try{ const im=await compressImage(f, S.firebase?1200:900); await S.store.addPhoto(id,{...im,caption:''}); }catch(err){ toast(err.message); } }
     renderProject(id,true);
   };
+  // ลากเพื่อสลับตำแหน่งภาพ แล้วบันทึกลำดับใหม่
+  const saveOrder=async ids=>{ await Promise.all(ids.map((pid,i)=>S.store.updatePhoto(id,pid,{order:i}))); toast('บันทึกลำดับภาพแล้ว'); renderProject(id,true); };
+  let dragId=null;
+  $$('#phs figure').forEach(fg=>{
+    fg.addEventListener('dragstart',e=>{ if(e.target.closest('input,button')){ e.preventDefault(); return; } dragId=fg.dataset.id; fg.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; try{ e.dataTransfer.setData('text/plain',dragId); }catch(x){} });
+    fg.addEventListener('dragend',()=>{ fg.classList.remove('dragging'); $$('#phs figure').forEach(f=>f.classList.remove('over')); });
+    fg.addEventListener('dragover',e=>{ if(!dragId||dragId===fg.dataset.id) return; e.preventDefault(); e.dataTransfer.dropEffect='move'; fg.classList.add('over'); });
+    fg.addEventListener('dragleave',()=>fg.classList.remove('over'));
+    fg.addEventListener('drop',e=>{ e.preventDefault(); fg.classList.remove('over'); if(!dragId||dragId===fg.dataset.id) return;
+      const ids=photos.map(p=>p.id); const from=ids.indexOf(dragId), to=ids.indexOf(fg.dataset.id);
+      ids.splice(to,0,ids.splice(from,1)[0]); dragId=null; saveOrder(ids); });
+    $$('.mvph',fg).forEach(b=>b.onclick=()=>{ const ids=photos.map(p=>p.id); const i=ids.indexOf(fg.dataset.id), j=i+(+b.dataset.d);
+      if(j<0||j>=ids.length) return; [ids[i],ids[j]]=[ids[j],ids[i]]; saveOrder(ids); });
+  });
   $$('#phs figure').forEach(fg=>{
     $('.cap',fg).onchange=e=>S.store.updatePhoto(id,fg.dataset.id,{caption:e.target.value.trim()}).then(()=>toast('บันทึกคำบรรยายแล้ว'));
     $('.delph',fg).onclick=async()=>{ if(await ask('ลบภาพนี้?','ลบ')){ await S.store.deletePhoto(id,fg.dataset.id); renderProject(id,true); } };
@@ -1565,24 +1580,21 @@ function buildReport(p, st, ts, photos, resps, set){
   H2('การใช้งบประมาณ');
   add('p',{text:`ได้รับงบประมาณ ${money(p.budgetPlanned)} บาท ใช้จ่ายจริง ${money(p.budgetSpent)} บาท (${bahtText(p.budgetSpent)}) คิดเป็นร้อยละ ${f2(pct(num(p.budgetSpent),num(p.budgetPlanned)))} ของงบประมาณที่ได้รับ${num(p.budgetPlanned)-num(p.budgetSpent)>0?` คงเหลือ ${money(num(p.budgetPlanned)-num(p.budgetSpent))} บาท`:''}`});
   H2('ปัญหาและอุปสรรค'); add('ol',{items:lines(p.problems).length?lines(p.problems):['-'],prefix:'3.'});
-  H2('ข้อเสนอแนะ'); add('ol',{items:lines(p.suggestions).length?lines(p.suggestions):['-'],prefix:'4.'});
+  // หัวข้อข้อเสนอแนะ + รายการ จะอยู่หน้าเดียวกับส่วนลงนามเสมอ (หน้าลงนามจึงไม่ว่างเปล่า)
+  add('h2',{text:`${++sec}. ข้อเสนอแนะ`,keep:true}); add('ol',{items:lines(p.suggestions).length?lines(p.suggestions):['-'],prefix:'4.',keep:true});
   // ผู้รายงานและผู้เห็นชอบอยู่ในบล็อกเดียว จึงไม่ถูกแยกไปคนละหน้า
   add('sign',{lines:['ลงชื่อ .............................. ผู้รายงาน',`(${p.responsible||'..............................'})`,p.responsiblePos||'','',
     'ลงชื่อ .............................. ผู้เห็นชอบ',`(${set.director||'..............................'})`,set.directorPos||'']});
 
   add('h1',{text:'ภาคผนวก',pb:true});
   if(photos.length){ add('h2',{text:'ภาพประกอบการดำเนินโครงการ'}); add('imgs',{items:photos}); }
-  if(resps.length){
-    add('h2',{text:'รายชื่อผู้ตอบแบบประเมินความพึงพอใจ',pb:photos.length>0});
-    add('table',{head:['ที่','ชื่อ-สกุล','เพศ','ระดับชั้น','ห้องเรียน'],widths:[7,30,10,20,33],align:['c','l','c','l','l'],
-      rows:resps.map((r,i)=>[i+1,r.name,r.gender,r.level||'',r.room||r.occ||''])});
-  }
+  // ไม่ใส่รายชื่อผู้ตอบแบบประเมินความพึงพอใจในรายงาน (รักษาความลับของผู้ประเมิน) — ครู/แอดมินดูได้ในหน้าเว็บ
   if(ts.has && ts.items.length){
-    add('h2',{text:'ร้อยละของผู้ตอบถูกในแบบทดสอบรายข้อ',pb:photos.length>0||resps.length>0});
+    add('h2',{text:'ร้อยละของผู้ตอบถูกในแบบทดสอบรายข้อ',pb:photos.length>0});
     add('table',{head:['ข้อ','คำถาม','ก่อนเรียน','หลังเรียน'],widths:[8,60,16,16],align:['c','l','c','c'],
       rows:ts.items.map((it,i)=>[i+1,it.q,f2(it.pre),f2(it.post)])});
   }
-  if(!photos.length && !resps.length && !ts.has) add('p',{text:'-'});
+  if(!photos.length && !ts.has) add('p',{text:'-'});
   return B;
 }
 
@@ -1634,6 +1646,7 @@ function paginate(B, opt={}){
   for(const b of blocks){
     if(b.pb && cur.children.length) newPage();
     const els=toEl(blockHTML({...b,pb:false}).replace('<div class="rp-pb"></div>',''));
+    if(b.keep) els.forEach(e=>e.dataset.keep='1');
     for(const el of els){
       if(el.tagName==='TABLE'){
         const head=el.tHead, cg=el.querySelector('colgroup'), rows=[...el.tBodies[0].rows];
@@ -1647,7 +1660,12 @@ function paginate(B, opt={}){
         continue;
       }
       cur.appendChild(el);
-      if(over()){ cur.removeChild(el); const prev=cur.lastElementChild; newPage(); if(keepWithNext(prev)) cur.appendChild(prev); cur.appendChild(el); }
+      if(over()){ cur.removeChild(el);
+        // ย้ายเนื้อหาที่ต้องอยู่คู่กัน (หัวข้อ หรือส่วนที่ทำเครื่องหมาย keep) ไปหน้าใหม่ด้วย
+        const carry=[]; let prev=cur.lastElementChild;
+        if(/rp-sign/.test(el.className)) while(prev && prev.dataset.keep){ carry.unshift(prev); prev=prev.previousElementSibling; }
+        else if(keepWithNext(prev)) carry.push(prev);
+        newPage(); carry.forEach(c=>cur.appendChild(c)); cur.appendChild(el); }
     }
   }
   // เลขหน้า มุมขวาบน (ไม่ใส่หน้าปก)
@@ -1713,12 +1731,12 @@ async function reportToDocx(B, filename){
       case 'title': out.push(P([R(b.text,{bold:true,size:b.size*2})],{align:D.AlignmentType.CENTER,after:80})); break;
       case 'h1': out.push(new D.Paragraph({alignment:D.AlignmentType.CENTER,pageBreakBefore:!!b.pb,spacing:{after:240},
         children:b.text.split('\n').map((l,i)=>new D.TextRun({text:l,bold:true,size:40,font:F,break:i?1:0}))})); break;
-      case 'h2': out.push(P([R(b.text,{bold:true})],{before:160,pb:b.pb})); break;
+      case 'h2': out.push(P([R(b.text,{bold:true})],{before:160,pb:b.pb,keepNext:!!b.keep})); break;
       case 'h3': out.push(P([R(b.text,{bold:true})],{before:120,left:360})); break;
       case 'cap': out.push(P([R(b.text,{bold:true})],{before:120,after:40})); break;
       case 'p': out.push(new D.Paragraph({children:[R(b.text)],alignment:D.AlignmentType.THAI_DISTRIBUTE||D.AlignmentType.JUSTIFIED,indent:{firstLine:720}})); break;
       case 'li': out.push(P([R(b.text)],{left:720})); break;
-      case 'ol': b.items.forEach((t,i)=>out.push(P([R(b.plain?t:`${olLabel(b.prefix,i)} ${t}`)],{left:720}))); break;
+      case 'ol': b.items.forEach((t,i)=>out.push(P([R(b.plain?t:`${olLabel(b.prefix,i)} ${t}`)],{left:720,keepNext:!!b.keep}))); break;
       case 'table': {
         const cw=b.widths.map(w=>Math.round(CW*w/100));
         const mk=(cells,isHead,isBold)=>new D.TableRow({tableHeader:isHead,cantSplit:true,children:cells.map((c,ci)=>new D.TableCell({

@@ -210,3 +210,11 @@ table.t tr.expired td{background:#f1f2f1;color:#8a8f8c}
 @media (max-width:600px){.menubar a{font-size:14.5px;padding:10px 11px}.menubar .mbin{flex-wrap:nowrap}}
 @media print{.menubar{display:none}}
 .paper .rp-sign{margin-left:28%;white-space:nowrap}
+/* หัวข้อหลักของแต่ละกล่องเป็นสีแดง */
+.card h2,.card > .row > h2{color:#c62828}
+/* ลากสลับภาพ */
+.photos figure{position:relative;cursor:grab;transition:transform .12s,box-shadow .12s}
+.photos figure.dragging{opacity:.45}
+.photos figure.over{outline:3px dashed #f2c230;outline-offset:2px;transform:scale(1.02)}
+.photos .phnum{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.6);color:#fff;font-weight:700;font-size:13px;border-radius:99px;min-width:24px;height:24px;display:flex;align-items:center;justify-content:center;padding:0 6px}
+.login h2{color:inherit}
