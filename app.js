@@ -1535,11 +1535,6 @@ function buildReport(p, st, ts, photos, resps, set){
       add('table',{head:['ที่','รหัส','ชื่อ-สกุล','ก่อน','หลัง','ผลต่าง','ผล'],widths:[6,21,37,9,9,9,9],align:['c','c','l','c','c','c','c'],
         rows:ts.learners.map((l,i)=>{ const d=l.pre!=null&&l.post!=null?l.post-l.pre:null;
           return [i+1,l.sid||'-',l.name,l.pre??'-',l.post??'-',d==null?'-':(d>0?'+':'')+d,l.post==null?'-':(pct(l.post,ts.N)>=ts.cut?'ผ่าน':'ไม่ผ่าน')]; })});
-      if(ts.rooms.length>1){
-        cap('ผลการทดสอบก่อนเรียนและหลังเรียน จำแนกตามห้องเรียน');
-        add('table',{head:['ห้องเรียน','ก่อน (คน)','x̄ ก่อน','หลัง (คน)','x̄ หลัง'],widths:[48,13,13,13,13],align:['l','c','c','c','c'],
-          rows:ts.rooms.map(r=>[r.room,r.preN,r.preN?f2(r.preM):'-',r.postN,r.postN?f2(r.postM):'-'])});
-      }
     }
   }
   H2('ผลการประเมินความพึงพอใจ');
@@ -1571,8 +1566,9 @@ function buildReport(p, st, ts, photos, resps, set){
   add('p',{text:`ได้รับงบประมาณ ${money(p.budgetPlanned)} บาท ใช้จ่ายจริง ${money(p.budgetSpent)} บาท (${bahtText(p.budgetSpent)}) คิดเป็นร้อยละ ${f2(pct(num(p.budgetSpent),num(p.budgetPlanned)))} ของงบประมาณที่ได้รับ${num(p.budgetPlanned)-num(p.budgetSpent)>0?` คงเหลือ ${money(num(p.budgetPlanned)-num(p.budgetSpent))} บาท`:''}`});
   H2('ปัญหาและอุปสรรค'); add('ol',{items:lines(p.problems).length?lines(p.problems):['-'],prefix:'3.'});
   H2('ข้อเสนอแนะ'); add('ol',{items:lines(p.suggestions).length?lines(p.suggestions):['-'],prefix:'4.'});
-  add('sign',{lines:['ลงชื่อ .............................. ผู้รายงาน',`(${p.responsible||'..............................'})`,p.responsiblePos||'']});
-  add('sign',{lines:['ลงชื่อ .............................. ผู้เห็นชอบ',`(${set.director||'..............................'})`,set.directorPos||'']});
+  // ผู้รายงานและผู้เห็นชอบอยู่ในบล็อกเดียว จึงไม่ถูกแยกไปคนละหน้า
+  add('sign',{lines:['ลงชื่อ .............................. ผู้รายงาน',`(${p.responsible||'..............................'})`,p.responsiblePos||'','',
+    'ลงชื่อ .............................. ผู้เห็นชอบ',`(${set.director||'..............................'})`,set.directorPos||'']});
 
   add('h1',{text:'ภาคผนวก',pb:true});
   if(photos.length){ add('h2',{text:'ภาพประกอบการดำเนินโครงการ'}); add('imgs',{items:photos}); }
@@ -1704,7 +1700,7 @@ async function reportToDocx(B, filename){
   const D=window.docx, F='TH Sarabun New';
   const R=(text,o={})=>new D.TextRun({text:String(text??''),bold:o.bold,size:o.size||32,font:F});
   const AL={l:D.AlignmentType.LEFT,c:D.AlignmentType.CENTER,r:D.AlignmentType.RIGHT};
-  const P=(runs,o={})=>new D.Paragraph({children:runs,alignment:o.align,pageBreakBefore:o.pb,
+  const P=(runs,o={})=>new D.Paragraph({children:runs,alignment:o.align,pageBreakBefore:o.pb,keepNext:o.keepNext,keepLines:o.keepNext,
     indent:o.first?{firstLine:720}:(o.left?{left:o.left}:undefined),spacing:{before:o.before||0,after:o.after||0,line:o.line}});
   const none={style:D.BorderStyle.NONE,size:0,color:'FFFFFF'};
   const thin={style:D.BorderStyle.SINGLE,size:4,color:'666666'};
@@ -1748,7 +1744,7 @@ async function reportToDocx(B, filename){
         out.push(new D.Table({width:{size:CW,type:D.WidthType.DXA},columnWidths:[CW/2,CW/2],rows,
           borders:{top:none,bottom:none,left:none,right:none,insideHorizontal:none,insideVertical:none}}));
         break; }
-      case 'sign': out.push(P([R('')])); b.lines.forEach(l=>out.push(P([R(l)],{align:D.AlignmentType.CENTER,left:2000}))); break;
+      case 'sign': out.push(P([R('')],{keepNext:true})); b.lines.forEach((l,i)=>out.push(P([R(l)],{align:D.AlignmentType.CENTER,left:2000,keepNext:i<b.lines.length-1}))); break;
     }
   }
   const doc=new D.Document({
