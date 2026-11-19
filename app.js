@@ -5,7 +5,7 @@
    ===================================================================== */
 const PAGE_MODE = window.APP_MODE || 'learner';
 let MODE = PAGE_MODE;
-const ADMIN_VIEWS = ['login','setup','home','new','edit','p','r','test','org','staff','rooms','summary','sumpdf'];
+const ADMIN_VIEWS = ['password','login','setup','home','new','edit','p','r','test','org','staff','rooms','summary','sumpdf'];
 const FIREBASE_CONFIG = window.FIREBASE_CONFIG || null;
 const DOCX_URL = 'https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js';
 const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
@@ -77,6 +77,8 @@ const app = $('#app');
 const PREFIX_RE = /^(นางสาว|นาง|นาย|น\.ส\.|ด\.ช\.|ด\.ญ\.|เด็กชาย|เด็กหญิง)\s*(?=[ก-ฮ])/;
 function normName(s){ return String(s||'').replace(/\s+/g,' ').trim().replace(PREFIX_RE,'').trim(); }
 const nameKey = s => normName(s).replace(/\s+/g,'').toLowerCase();
+const maskEmail=e=>{ const [u,d]=String(e||'').split('@'); if(!d) return e||''; return (u.length<=2?u[0]+'•':u.slice(0,2)+'•••')+'@'+d; };
+const EMAIL_RE=/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 function normPhone(s){ let d=String(s||'').replace(/\D/g,''); if(d.length===9 && d[0]!=='0') d='0'+d; return d; }
 async function sha256(s){ const b=await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)); return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join(''); }
 async function staffEmail(name){ return 't'+(await sha256('psum-staff:'+nameKey(name))).slice(0,24)+STAFF_DOMAIN; }
@@ -277,9 +279,29 @@ class LocalStore{
   async currentUser(){ let e=null; try{ e=sessionStorage.getItem('psum-session'); }catch(x){} return e&&this.mem.staff[e] ? {email:e,...this.mem.staff[e]} : null; }
   async login(name, phone){
     const e=await staffEmail(name); const m=this.mem.staff[e];
-    if(!m || m.ph!==await sha256(normPhone(phone))) throw new Error('ชื่อหรือเบอร์โทรไม่ถูกต้อง');
+    const raw=String(phone||'').trim();
+    const ok = m && (m.ph===await sha256(raw) || m.ph===await sha256(normPhone(raw)));
+    if(!ok) throw new Error('ชื่อหรือรหัสผ่านไม่ถูกต้อง');
     try{ sessionStorage.setItem('psum-session',e); }catch(x){}
     return {email:e,...m};
+  }
+  async checkPw(m, pw){ const raw=String(pw||'').trim(); return m.ph===await sha256(raw) || m.ph===await sha256(normPhone(raw)); }
+  async recoveryInfo(){ const u=await this.currentUser(); const m=this.mem.staff[u.email]; return {email:m.recovery||'', verified:!!m.recovery}; }
+  async setRecoveryEmail(pw, email){
+    const u=await this.currentUser(); const m=this.mem.staff[u.email];
+    if(!await this.checkPw(m,pw)) throw new Error('รหัสผ่านปัจจุบันไม่ถูกต้อง');
+    m.recovery=email; this.persist();
+  }
+  async forgotPassword(name){
+    const m=this.mem.staff[await staffEmail(name)];
+    if(!m) throw new Error('ไม่พบชื่อนี้ในระบบ');
+    if(!m.recovery) throw new Error('บัญชีนี้ยังไม่ได้ผูกอีเมลสำหรับกู้รหัสผ่าน กรุณาติดต่อแอดมิน');
+    return {email:m.recovery, demo:true};
+  }
+  async changePassword(oldPw, newPw){
+    const u=await this.currentUser(); const m=this.mem.staff[u.email]; const raw=String(oldPw||'').trim();
+    if(!(m.ph===await sha256(raw) || m.ph===await sha256(normPhone(raw)))) throw new Error('รหัสผ่านเดิมไม่ถูกต้อง');
+    m.ph=await sha256(newPw); this.persist();
   }
   async logout(){ try{ sessionStorage.removeItem('psum-session'); }catch(x){} }
   async listStaff(){ return Object.entries(this.mem.staff).map(([email,m])=>({email,...m,ph:undefined})); }
@@ -344,22 +366,71 @@ class FireStore{
   async currentUser(){
     const u=this.auth.currentUser || await this.waitAuth(); if(!u) return null;
     try{ const d=await this.staffRef().get(); this.members=d.exists?d.data().members||{}:{}; }catch(e){ this.members={}; }
-    const m=this.members[u.email]; if(!m){ await this.auth.signOut(); return null; }
-    return {email:u.email,...m};
+    let key=u.email;
+    if(!this.members[key]){ try{ const a=await this.db.collection('aliases').doc(u.email).get(); if(a.exists) key=a.data().key; }catch(e){} }
+    const m=this.members[key]; if(!m){ await this.auth.signOut(); return null; }
+    this.loginKey=key;
+    return {email:key,...m};
   }
   async login(name, phone){
-    const email=await staffEmail(name);
-    try{ await this.auth.signInWithEmailAndPassword(email, normPhone(phone)); }
+    const key=await staffEmail(name);
+    let real=''; try{ const d=await this.db.collection('logins').doc(key).get(); if(d.exists) real=d.data().email||''; }catch(e){}
+    const raw=String(phone||'').trim(), norm=normPhone(raw);
+    const hard=e=>/network|too-many|operation-not-allowed|unauthorized-domain/.test(e.code||'');
+    const tryPw=async em=>{ try{ await this.auth.signInWithEmailAndPassword(em, raw); }
+      catch(e1){ if(norm && norm!==raw && !hard(e1)) await this.auth.signInWithEmailAndPassword(em, norm); else throw e1; } };
+    try{
+      if(real){ try{ await tryPw(real); }catch(e2){ if(hard(e2)) throw e2; await tryPw(key); } }
+      else await tryPw(key);
+    }
     catch(e){ const c=e.code||'';
       throw new Error(/network/i.test(c)?'เชื่อมต่ออินเทอร์เน็ตไม่ได้'
         : c==='auth/operation-not-allowed'?'ยังไม่ได้เปิดใช้ Email/Password ใน Firebase Authentication'
         : c==='auth/unauthorized-domain'?'โดเมนนี้ยังไม่ได้เพิ่มใน Authorized domains ของ Firebase'
         : c==='auth/too-many-requests'?'ลองผิดหลายครั้งเกินไป กรุณารอสักครู่แล้วลองใหม่'
-        : 'ชื่อหรือเบอร์โทรไม่ถูกต้อง (หรือยังไม่ได้นำเข้ารายชื่อบุคลากร)'); }
+        : 'ชื่อหรือรหัสผ่านไม่ถูกต้อง (หรือยังไม่ได้นำเข้ารายชื่อบุคลากร)'); }
     const u=await this.currentUser(); if(!u) throw new Error('บัญชีนี้ไม่ได้รับสิทธิ์เข้าใช้ระบบ');
     return u;
   }
   async logout(){ await this.auth.signOut(); }
+  async reauth(pw){
+    const u=this.auth.currentUser; const raw=String(pw||'').trim();
+    const tryCred=async p=>u.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(u.email,p));
+    try{ try{ await tryCred(raw); }catch(e){ if(normPhone(raw)&&normPhone(raw)!==raw) await tryCred(normPhone(raw)); else throw e; } }
+    catch(e){ throw new Error(/too-many/.test(e.code||'')?'ลองผิดหลายครั้งเกินไป กรุณารอสักครู่':'รหัสผ่านปัจจุบันไม่ถูกต้อง'); }
+  }
+  async recoveryInfo(){
+    const key=this.loginKey||this.auth.currentUser.email; let email='';
+    try{ const d=await this.db.collection('logins').doc(key).get(); if(d.exists) email=d.data().email||''; }catch(e){}
+    return {email, verified: !!email && this.auth.currentUser.email===email};
+  }
+  /* ผูกอีเมลจริง: Firebase ส่งลิงก์ยืนยัน เมื่อกดแล้วบัญชีจะใช้อีเมลนี้ (ยังล็อกอินด้วยชื่อเหมือนเดิม) */
+  async setRecoveryEmail(pw, email){
+    await this.reauth(pw);
+    const u=this.auth.currentUser, key=this.loginKey||u.email;
+    await this.db.collection('aliases').doc(email).set({key});
+    await this.db.collection('logins').doc(key).set({email});
+    this.auth.languageCode='th';
+    try{ await u.verifyBeforeUpdateEmail(email); }
+    catch(e){ throw new Error(e.code==='auth/email-already-in-use'?'อีเมลนี้ถูกใช้กับบัญชีอื่นแล้ว':e.code==='auth/invalid-email'?'รูปแบบอีเมลไม่ถูกต้อง':'ส่งอีเมลยืนยันไม่สำเร็จ: '+(e.code||e.message)); }
+  }
+  async forgotPassword(name){
+    const key=await staffEmail(name); let email='';
+    try{ const d=await this.db.collection('logins').doc(key).get(); if(d.exists) email=d.data().email||''; }catch(e){}
+    if(!email) throw new Error('ชื่อนี้ยังไม่ได้ผูกอีเมลสำหรับกู้รหัสผ่าน (หรือพิมพ์ชื่อไม่ถูก) กรุณาติดต่อแอดมิน');
+    this.auth.languageCode='th';
+    try{ await this.auth.sendPasswordResetEmail(email); }
+    catch(e){ throw new Error(e.code==='auth/user-not-found'?'อีเมลนี้ยังไม่ได้กดยืนยัน กรุณาติดต่อแอดมิน':'ส่งอีเมลไม่สำเร็จ: '+(e.code||e.message)); }
+    return {email};
+  }
+  async changePassword(oldPw, newPw){
+    const u=this.auth.currentUser; const raw=String(oldPw||'').trim();
+    const tryCred=async pw=>u.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(u.email,pw));
+    try{ try{ await tryCred(raw); }catch(e){ if(normPhone(raw)&&normPhone(raw)!==raw) await tryCred(normPhone(raw)); else throw e; } }
+    catch(e){ throw new Error(/too-many/.test(e.code||'')?'ลองผิดหลายครั้งเกินไป กรุณารอสักครู่':'รหัสผ่านเดิมไม่ถูกต้อง'); }
+    try{ await u.updatePassword(newPw); }
+    catch(e){ throw new Error(e.code==='auth/weak-password'?'รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร':'เปลี่ยนรหัสผ่านไม่สำเร็จ: '+(e.code||e.message)); }
+  }
   async listStaff(){ const d=await this.staffRef().get(); const m=d.exists?d.data().members||{}:{}; return Object.entries(m).map(([email,v])=>({email,...v})); }
   async makeAccount(sa, email, phone){
     try{ await sa.createUserWithEmailAndPassword(email, phone); return 'สร้างแล้ว'; }
@@ -637,7 +708,7 @@ function drawHeader(){
     return;
   }
   h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand">ระบบสรุปผลการดำเนินโครงการ<small>${esc(org)}</small></div>
-    <nav>${S.user?`<span class="who">👤 ${esc(S.user.name)}${isAdmin()?' (ผู้ดูแล)':''}</span><button id="logoutBtn">ออกจากระบบ</button>`:''}
+    <nav>${S.user?`<span class="who">👤 ${esc(S.user.name)}${isAdmin()?' (ผู้ดูแล)':''}</span><a href="#password">🔑 เปลี่ยนรหัสผ่าน</a><button id="logoutBtn">ออกจากระบบ</button>`:''}
       ${!S.firebase?'<span class="badge">โหมดทดลอง</span>':''}</nav>`;
   if(S.user){
     mb.innerHTML=`<div class="mbin"><a href="#home" data-v="home">โครงการ</a><a href="#new" data-v="new">+ โครงการใหม่</a><a href="#summary" data-v="summary">สรุปรายปี</a>${isAdmin()?'<a href="#staff" data-v="staff">บุคลากร</a><a href="#rooms" data-v="rooms">ห้องเรียน</a><a href="#org" data-v="org">ตั้งค่าหน่วยงาน</a>':''}</div>`;
@@ -676,6 +747,7 @@ async function route(){
     if(view==='org' && isAdmin()) return await renderSettings();
     if(view==='staff' && isAdmin()) return await renderStaff();
     if(view==='rooms' && isAdmin()) return await renderRooms();
+    if(view==='password') return renderPassword();
     if(view==='summary') return await renderSummary();
     if(view==='sumpdf') return await renderSummaryPdf(id);
     return await renderHome();
@@ -870,9 +942,20 @@ function renderLogin(){
     <h2 style="text-align:center">เข้าสู่ระบบ (ครูและเจ้าหน้าที่)</h2>
     ${!S.firebase?'<div class="note">โหมดทดลอง: ใช้ชื่อและเบอร์โทรตามไฟล์รายชื่อที่นำเข้า หรือบัญชีทดลอง ชื่อ <b>ทดลอง</b> รหัส <b>1234</b> (ถ้าสร้างไว้)</div>':''}
     <form id="lf"><label>ชื่อ <span class="hint">(พิมพ์เฉพาะชื่อ ไม่ต้องมีคำนำหน้าและนามสกุล)</span></label><input type="text" name="name" required autocomplete="username" placeholder="เช่น วนศาสตร์">
-    <label>รหัสผ่าน <span class="hint">(เบอร์โทรศัพท์ 10 หลัก)</span></label><div class="pwwrap"><input type="password" name="pw" id="pw" required inputmode="numeric" autocomplete="current-password" placeholder="0xxxxxxxxx"><button type="button" class="eye" id="eye" aria-label="แสดงรหัสผ่าน" title="แสดง/ซ่อนรหัสผ่าน">👁</button></div>
+    <label>รหัสผ่าน <span class="hint">(ครั้งแรกใช้เบอร์โทรศัพท์ 10 หลัก)</span></label><div class="pwwrap"><input type="password" name="pw" id="pw" required inputmode="numeric" autocomplete="current-password" placeholder="0xxxxxxxxx"><button type="button" class="eye" id="eye" aria-label="แสดงรหัสผ่าน" title="แสดง/ซ่อนรหัสผ่าน">👁</button></div>
     <div class="row" style="margin-top:16px"><button class="btn" id="lbtn">เข้าสู่ระบบ</button><span class="err" id="lerr"></span></div></form>
+    <div style="margin-top:14px"><a href="#" id="forgot">ลืมรหัสผ่าน?</a></div>
+    <div id="fbox" class="note" style="display:none;margin-top:8px;font-size:15px"></div>
 </div>`;
+  $('#forgot').onclick=async e=>{
+    e.preventDefault(); const name=$('input[name=name]').value.trim(); const box=$('#fbox'); box.style.display='';
+    if(!name){ box.innerHTML='พิมพ์<b>ชื่อ</b>ของคุณในช่องด้านบนก่อน แล้วกด "ลืมรหัสผ่าน?" อีกครั้ง'; $('input[name=name]').focus(); return; }
+    box.textContent='กำลังส่ง…';
+    try{ const r=await S.store.forgotPassword(name);
+      box.innerHTML=r.demo?`โหมดทดลอง: ระบบจริงจะส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่ <b>${esc(maskEmail(r.email))}</b> (โหมดทดลองไม่ได้ส่งอีเมลจริง)`
+        :`ส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่ <b>${esc(maskEmail(r.email))}</b> แล้ว<br>เปิดอีเมล กดลิงก์ แล้วตั้งรหัสใหม่ จากนั้นกลับมาเข้าสู่ระบบด้วย<b>ชื่อ</b>และรหัสใหม่<br><span class="muted small">ถ้าไม่เห็นอีเมล ให้ดูในกล่อง <b>จดหมายขยะ / สแปม</b></span>`; }
+    catch(x){ box.innerHTML=`<span class="err">${esc(x.message)}</span>`; }
+  };
   $('#eye').onclick=()=>{ const p=$('#pw'); const show=p.type==='password'; p.type=show?'text':'password'; $('#eye').textContent=show?'🙈':'👁'; $('#eye').setAttribute('aria-label',show?'ซ่อนรหัสผ่าน':'แสดงรหัสผ่าน'); };
   $('#lf').onsubmit=async e=>{
     e.preventDefault(); const f=e.target; $('#lerr').textContent='กำลังตรวจสอบ…'; $('#lbtn').disabled=true;
@@ -1064,6 +1147,63 @@ async function renderRooms(){
   $('#saveR').onclick=async()=>{
     const clean=list.map(c=>({center:c.center.trim(),teacher:c.teacher.trim().replace(/^ครู\s*/,'')})).filter(c=>c.center);
     await S.store.saveClasses(clean); list=clean; draw(); toast(`บันทึกแล้ว ${clean.length} ห้องเรียน`);
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* เปลี่ยนรหัสผ่าน (ครูและแอดมิน)                                        */
+/* ------------------------------------------------------------------ */
+function renderPassword(){
+  const pw=(id,label,hint='')=>`<label>${label} ${hint?`<span class="hint">${hint}</span>`:''}</label>
+    <div class="pwwrap"><input type="password" id="${id}" autocomplete="${id==='op'?'current-password':'new-password'}" required><button type="button" class="eye" data-for="${id}" aria-label="แสดงรหัสผ่าน">👁</button></div>`;
+  app.innerHTML=`<div class="card login" style="max-width:460px">
+    <h2>🔑 เปลี่ยนรหัสผ่าน</h2>
+    <p class="muted small" style="margin-top:-4px">บัญชี: <b>${esc(S.user.name)}</b> · เวลาเข้าสู่ระบบยังใช้ชื่อเหมือนเดิม เปลี่ยนแค่รหัสผ่าน</p>
+    <form id="pf">
+      ${pw('op','รหัสผ่านเดิม','(ถ้ายังไม่เคยเปลี่ยน คือเบอร์โทร)')}
+      ${pw('np','รหัสผ่านใหม่','(อย่างน้อย 6 ตัว ใช้ตัวเลข ตัวอักษร หรือผสมก็ได้)')}
+      ${pw('cp','ยืนยันรหัสผ่านใหม่')}
+      <div class="row" style="margin-top:16px"><button class="btn" id="pbtn">บันทึกรหัสผ่านใหม่</button><a class="btn ghost" href="#home">ยกเลิก</a></div>
+      <div class="err" id="perr" style="margin-top:8px"></div>
+    </form>
+    </div>
+    <div class="card login" style="max-width:460px">
+      <h2>📧 อีเมลสำหรับกู้รหัสผ่าน</h2>
+      <p class="muted small" style="margin-top:-4px">ถ้าลืมรหัสผ่าน กด "ลืมรหัสผ่าน?" ที่หน้าเข้าสู่ระบบ ระบบจะส่งลิงก์ตั้งรหัสใหม่ไปที่อีเมลนี้</p>
+      <div id="recInfo" class="small" style="margin-bottom:6px">กำลังตรวจสอบ…</div>
+      <form id="ef">
+        <label>อีเมลของคุณ</label><input type="email" id="em" placeholder="เช่น yourname@gmail.com" autocomplete="email" required>
+        ${pw('ep','รหัสผ่านปัจจุบัน','(เพื่อยืนยันว่าเป็นเจ้าของบัญชี)')}
+        <div class="row" style="margin-top:14px"><button class="btn" id="ebtn">บันทึกและส่งอีเมลยืนยัน</button></div>
+        <div class="err" id="eerr" style="margin-top:8px"></div>
+      </form>
+      <p class="muted small" style="margin-top:14px">ยังไม่ได้ผูกอีเมลและลืมรหัสผ่าน? ให้แอดมินลบบัญชีใน Firebase Console → Authentication แล้วเพิ่มชื่อใหม่ในเมนูบุคลากร (รหัสจะกลับเป็นเบอร์โทร)</p></div>`;
+  (async()=>{ try{ const r=await S.store.recoveryInfo(); $('#em').value=r.email||'';
+    $('#recInfo').innerHTML = !r.email ? '<span class="pill off">ยังไม่ได้ผูกอีเมล</span>'
+      : r.verified ? `<span class="pill">✓ ใช้งานได้</span> ${esc(r.email)}`
+      : `<span class="pill gray">รอยืนยัน</span> ${esc(r.email)} — เปิดอีเมลแล้วกดลิงก์ยืนยัน จากนั้นออกจากระบบแล้วเข้าใหม่`; }catch(e){ $('#recInfo').textContent=''; } })();
+  $('#ef').onsubmit=async e=>{
+    e.preventDefault(); const em=$('#em').value.trim().toLowerCase(), ep=$('#ep').value.trim(); const err=m=>{ $('#eerr').innerHTML=m; };
+    if(!EMAIL_RE.test(em)) return err('รูปแบบอีเมลไม่ถูกต้อง');
+    if(!ep) return err('กรุณากรอกรหัสผ่านปัจจุบัน');
+    $('#ebtn').disabled=true; err('กำลังบันทึก…');
+    try{ await S.store.setRecoveryEmail(ep, em);
+      err(S.firebase?`<span style="color:var(--acc)">ส่งอีเมลยืนยันไปที่ <b>${esc(em)}</b> แล้ว — เปิดอีเมลแล้วกดลิงก์ยืนยัน (ถ้าไม่เห็น ดูในกล่องสแปม) หลังยืนยันแล้วให้ออกจากระบบและเข้าใหม่ด้วยชื่อเดิม</span>`
+        :`<span style="color:var(--acc)">บันทึกแล้ว (โหมดทดลองไม่ได้ส่งอีเมลจริง)</span>`);
+      $('#recInfo').innerHTML=S.firebase?`<span class="pill gray">รอยืนยัน</span> ${esc(em)}`:`<span class="pill">✓ ใช้งานได้</span> ${esc(em)}`; $('#ep').value='';
+    }catch(x){ err(esc(x.message)); }
+    $('#ebtn').disabled=false;
+  };
+  $$('.eye').forEach(b=>b.onclick=()=>{ const p=$('#'+b.dataset.for); const show=p.type==='password'; p.type=show?'text':'password'; b.textContent=show?'🙈':'👁'; });
+  $('#pf').onsubmit=async e=>{
+    e.preventDefault(); const op=$('#op').value.trim(), np=$('#np').value.trim(), cp=$('#cp').value.trim();
+    const err=m=>{ $('#perr').textContent=m; };
+    if(np.length<6) return err('รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร');
+    if(np!==cp) return err('รหัสผ่านใหม่กับช่องยืนยันไม่ตรงกัน');
+    if(np===op) return err('รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม');
+    $('#pbtn').disabled=true; err('กำลังบันทึก…');
+    try{ await S.store.changePassword(op,np); toast('เปลี่ยนรหัสผ่านเรียบร้อย ครั้งหน้าใช้รหัสใหม่เข้าสู่ระบบ'); location.hash='home'; }
+    catch(x){ err(x.message); $('#pbtn').disabled=false; }
   };
 }
 
