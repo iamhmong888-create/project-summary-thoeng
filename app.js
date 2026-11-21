@@ -5,7 +5,7 @@
    ===================================================================== */
 const PAGE_MODE = window.APP_MODE || 'learner';
 let MODE = PAGE_MODE;
-const ADMIN_VIEWS = ['password','login','setup','home','new','edit','p','r','test','org','staff','rooms','summary','sumpdf'];
+const ADMIN_VIEWS = ['find','password','login','setup','home','new','edit','p','r','test','org','staff','rooms','summary','sumpdf'];
 const FIREBASE_CONFIG = window.FIREBASE_CONFIG || null;
 const DOCX_URL = 'https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js';
 const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
@@ -316,7 +316,7 @@ class LocalStore{
   async updateStaff(email, data){ Object.assign(this.mem.staff[email], data); this.persist(); }
   async removeStaff(email){ delete this.mem.staff[email]; this.persist(); }
   // โครงการ
-  async listProjects(){ return Object.values(this.mem.projects).sort(byNewest); }
+  async listProjects(){ this.reloadMem(); return Object.values(this.mem.projects).sort(byNewest); }
   async getProject(id){ return this.mem.projects[id] ? JSON.parse(JSON.stringify(this.mem.projects[id])) : null; }
   async saveProject(p){ const id=p.id||uid(); const now=Date.now(); this.mem.projects[id]={...p,id,createdAt:p.createdAt||now,updatedAt:now}; this.persist(); return id; }
   async deleteProject(id){ for(const k of ['projects','responses','tests','photos']) delete this.mem[k][id]; this.persist(); }
@@ -324,13 +324,14 @@ class LocalStore{
   reloadMem(){ try{ const m=JSON.parse(localStorage.getItem(this.key)||'null'); if(m) this.mem=m; }catch(e){} }
   watch(fn){ const h=e=>{ if(e.key===this.key){ this.reloadMem(); fn(); } }; window.addEventListener('storage',h); return ()=>window.removeEventListener('storage',h); }
   watchPublic(id, cb){ return this.watch(async()=>cb(await this.getPublic(id))); }
+  watchProject(pid, cb){ return this.watch(cb); }
   watchPublicList(cb){ return this.watch(async()=>cb(await this.listPublic())); }
   async listPublic(){ return Object.values(this.mem.projects).map(p=>({id:p.id,...publicDoc(p,this.mem.settings)})).filter(d=>d.active).sort(byNewest); }
   async addResponse(pid,r){ (this.mem.responses[pid] ||= {})[uid()]=r; this.persist(); }
-  async listResponses(pid){ return Object.entries(this.mem.responses[pid]||{}).map(([id,r])=>({id,...r})).sort((a,b)=>a.at-b.at); }
+  async listResponses(pid){ this.reloadMem(); return Object.entries(this.mem.responses[pid]||{}).map(([id,r])=>({id,...r})).sort((a,b)=>a.at-b.at); }
   async deleteResponse(pid,rid){ delete (this.mem.responses[pid]||{})[rid]; this.persist(); }
   async addTest(pid,r){ (this.mem.tests[pid] ||= {})[uid()]=r; this.persist(); }
-  async listTests(pid){ return Object.entries(this.mem.tests[pid]||{}).map(([id,r])=>({id,...r})).sort((a,b)=>a.at-b.at); }
+  async listTests(pid){ this.reloadMem(); return Object.entries(this.mem.tests[pid]||{}).map(([id,r])=>({id,...r})).sort((a,b)=>a.at-b.at); }
   async deleteTest(pid,rid){ delete (this.mem.tests[pid]||{})[rid]; this.persist(); }
   async listPhotos(pid){ return Object.entries(this.mem.photos[pid]||{}).map(([id,r])=>({id,...r})).sort(photoOrder); }
   async addPhoto(pid,ph){ (this.mem.photos[pid] ||= {})[uid()]={...ph,at:Date.now()}; this.persist(); }
@@ -351,11 +352,12 @@ class FireStore{
   async init(){
     const b=`https://www.gstatic.com/firebasejs/${FB_VER}/`;
     await loadScript(b+'firebase-app-compat.js');
-    await loadScript(b+'firebase-auth-compat.js');
-    await loadScript(b+'firebase-firestore-compat.js');
+    await Promise.all([loadScript(b+'firebase-auth-compat.js'), loadScript(b+'firebase-firestore-compat.js')]);
     firebase.initializeApp(FIREBASE_CONFIG);
     this.db=firebase.firestore(); this.auth=firebase.auth();
-    try{ await this.db.enablePersistence({synchronizeTabs:true}); }catch(e){}
+    // ใช้ long polling: เสถียรกว่าบนมือถือ เครือข่ายมือถือ และเบราว์เซอร์ในแอป (LINE/Facebook)
+    // ไม่เปิดแคชออฟไลน์ (IndexedDB) เพราะบน iPhone บางรุ่นทำให้ค้างที่ "กำลังโหลด" และทำให้ครูเห็นข้อมูลเก่า
+    try{ this.db.settings({experimentalForceLongPolling:true, merge:true}); }catch(e){}
     this.members=null;
   }
   P(){ return this.db.collection('projects'); }
@@ -483,10 +485,15 @@ class FireStore{
     await this.P().doc(id).delete();
     await this.db.collection('surveys').doc(id).delete();
   }
-  async getPublic(id){ const d=await this.db.collection('surveys').doc(id).get(); return d.exists ? d.data() : null; }
+  async getPublic(id){ const d=await withTimeout(this.db.collection('surveys').doc(id).get(),20000,'โหลดข้อมูลช้าเกินไป'); return d.exists ? d.data() : null; }
+  watchProject(pid, cb){
+    const subs=['responses','tests'].map(c=>{ let first=true;
+      return this.P().doc(pid).collection(c).onSnapshot(()=>{ if(first){ first=false; return; } cb(); }, ()=>{}); });
+    return ()=>subs.forEach(u=>u());
+  }
   watchPublic(id, cb){ return this.db.collection('surveys').doc(id).onSnapshot(d=>cb(d.exists?d.data():null), ()=>{}); }
   watchPublicList(cb){ return this.db.collection('surveys').where('active','==',true).onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()})).sort(byNewest)), ()=>{}); }
-  async listPublic(){ const s=await this.db.collection('surveys').where('active','==',true).get(); return s.docs.map(d=>({id:d.id,...d.data()})).sort(byNewest); }
+  async listPublic(){ const s=await withTimeout(this.db.collection('surveys').where('active','==',true).get(),20000,'โหลดข้อมูลช้าเกินไป'); return s.docs.map(d=>({id:d.id,...d.data()})).sort(byNewest); }
   async addResponse(pid,r){ await this.P().doc(pid).collection('responses').add(r); }
   async listResponses(pid){ const s=await this.P().doc(pid).collection('responses').orderBy('at').get(); return s.docs.map(d=>({id:d.id,...d.data()})); }
   async deleteResponse(pid,rid){ await this.P().doc(pid).collection('responses').doc(rid).delete(); }
@@ -633,12 +640,13 @@ function testStats(p, rows){
   const Q=p.test?.questions||[], N=Q.length, cut=num(p.test?.passPct)||60;
   const sc=r=>Q.reduce((s,q,i)=>s+((r.answers||[])[i]===q.ans?1:0),0);
   const lk=learnerKey;
+  const tries={}; rows.forEach(r=>{ const k=r.kind+'|'+lk(r); tries[k]=(tries[k]||0)+1; });
   const latest=k=>{ const m=new Map(); rows.filter(r=>r.kind===k).sort((a,b)=>a.at-b.at).forEach(r=>m.set(lk(r),{...r,score:sc(r)})); return [...m.values()]; };
   const pre=latest('pre'), post=latest('post');
   const sum=a=>{ const s=msd(a.map(x=>x.score)); const pass=a.filter(x=>N&&pct(x.score,N)>=cut).length; return {...s,pm:pct(s.mean,N),pass,passP:pct(pass,a.length)}; };
   const preM=new Map(pre.map(x=>[lk(x),x])), postM=new Map(post.map(x=>[lk(x),x]));
   const keys=[...new Set([...preM.keys(),...postM.keys()])];
-  const learners=keys.map(k=>{ const a=preM.get(k), b=postM.get(k), x=b||a; return {key:k, name:x.name, sid:x.sid||'', room:x.room||'', level:x.level||'', pre:a?a.score:null, post:b?b.score:null}; })
+  const learners=keys.map(k=>{ const a=preM.get(k), b=postM.get(k), x=b||a; return {key:k, postTries:tries['post|'+k]||0, name:x.name, sid:x.sid||'', room:x.room||'', level:x.level||'', pre:a?a.score:null, post:b?b.score:null}; })
     .sort((a,b)=>(a.room||'').localeCompare(b.room||'','th')||String(a.sid).localeCompare(String(b.sid)));
   const roomNames=[...new Set(learners.map(l=>l.room||'ไม่ระบุ'))];
   const rooms=roomNames.map(r=>{ const L=learners.filter(l=>(l.room||'ไม่ระบุ')===r); const a=msd(L.filter(l=>l.pre!=null).map(l=>l.pre)), b=msd(L.filter(l=>l.post!=null).map(l=>l.post));
@@ -685,13 +693,21 @@ const S={ store:null, settings:{...DEFAULT_SETTINGS}, user:null, firebase:!!FIRE
 const isAdmin = () => S.user?.role==='admin';
 const inFrame = (()=>{ try{ return window.self!==window.top; }catch(e){ return true; } })();
 
+const withTimeout=(p,ms,msg)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error(msg)),ms))]);
+function showRetry(msg){
+  app.innerHTML=`<div class="card sv" style="text-align:center;padding:30px 18px"><div style="font-size:40px">📶</div><h2>โหลดไม่สำเร็จ</h2>
+    <p>${esc(msg)}</p><p class="muted small">ตรวจสอบสัญญาณอินเทอร์เน็ต แล้วกดลองใหม่ ถ้าเปิดจากแอป LINE ให้กด ⋯ แล้วเลือก "เปิดในเบราว์เซอร์"</p>
+    <button class="btn" onclick="location.reload()" style="font-size:17px;padding:10px 26px">🔄 ลองใหม่</button></div>`;
+}
 async function boot(){
   try{
     S.store = S.firebase ? new FireStore() : new LocalStore();
-    await S.store.init();
-    S.user=await S.store.currentUser();
-    if(!S.firebase || S.user) S.settings=await S.store.getSettings();
-  }catch(e){ app.innerHTML=`<div class="card"><h2>เริ่มระบบไม่สำเร็จ</h2><p>${esc(e.message)}</p></div>`; return; }
+    await withTimeout(S.store.init(), 25000, 'เชื่อมต่อระบบช้าเกินไป');
+    if(PAGE_MODE==='admin'){
+      S.user=await withTimeout(S.store.currentUser(), 20000, 'ตรวจสอบการเข้าสู่ระบบไม่สำเร็จ');
+      if(!S.firebase || S.user) S.settings=await withTimeout(S.store.getSettings(), 15000, 'โหลดข้อมูลหน่วยงานไม่สำเร็จ');
+    }
+  }catch(e){ drawHeader(); showRetry(e.message); return; }
   S.ready=true; drawHeader(); route();
 }
 window.addEventListener('hashchange',()=>S.ready&&route());
@@ -704,14 +720,14 @@ function drawHeader(){
   if(!mb){ mb=document.createElement('nav'); mb.id='menubar'; mb.className='menubar'; h.after(mb); }
   mb.innerHTML=''; mb.style.display='none';
   if(MODE==='learner'){
-    h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand brand-lg"><span class="shine"><span class="shine-text">${esc(org)}</span></span><small>แบบทดสอบและแบบประเมินสำหรับผู้เรียน</small></div>`;
+    h.innerHTML=`${!S.firebase?'<span class="badge" style="position:absolute;right:10px;top:6px;z-index:3;background:#b23a3a">โหมดทดลอง</span>':''}<img class="logo" src="logo.png" alt=""><div class="brand brand-lg"><span class="shine"><span class="shine-text">${esc(org)}</span></span><small>แบบทดสอบและแบบประเมินสำหรับผู้เรียน</small></div>`;
     return;
   }
   h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand">ระบบสรุปผลการดำเนินโครงการ<small>${esc(org)}</small></div>
     <nav>${S.user?`<span class="who">👤 ${esc(S.user.name)}${isAdmin()?' (ผู้ดูแล)':''}</span><a href="#password">🔑 เปลี่ยนรหัสผ่าน</a><button id="logoutBtn">ออกจากระบบ</button>`:''}
       ${!S.firebase?'<span class="badge">โหมดทดลอง</span>':''}</nav>`;
   if(S.user){
-    mb.innerHTML=`<div class="mbin"><a href="#home" data-v="home">โครงการ</a><a href="#new" data-v="new">+ โครงการใหม่</a><a href="#summary" data-v="summary">สรุปรายปี</a>${isAdmin()?'<a href="#staff" data-v="staff">บุคลากร</a><a href="#rooms" data-v="rooms">ห้องเรียน</a><a href="#org" data-v="org">ตั้งค่าหน่วยงาน</a>':''}</div>`;
+    mb.innerHTML=`<div class="mbin"><a href="#home" data-v="home">โครงการ</a><a href="#new" data-v="new">+ โครงการใหม่</a><a href="#summary" data-v="summary">สรุปรายปี</a><a href="#find" data-v="find">🔍 ค้นหาผู้เรียน</a>${isAdmin()?'<a href="#staff" data-v="staff">บุคลากร</a><a href="#rooms" data-v="rooms">ห้องเรียน</a><a href="#org" data-v="org">ตั้งค่าหน่วยงาน</a>':''}</div>`;
     mb.style.display=''; markMenu();
   }
   if($('#logoutBtn')) $('#logoutBtn').onclick=async()=>{ await S.store.logout(); S.user=null; drawHeader(); location.hash='login'; route(); };
@@ -726,10 +742,10 @@ async function route(){
   const h=decodeURIComponent(location.hash.slice(1));
   markMenu();
   const i=h.indexOf('-'); const view=i<0?h:h.slice(0,i); const id=i<0?'':h.slice(i+1);
-  if(S.unsub){ try{ S.unsub(); }catch(e){} S.unsub=null; }
+  if(S.unsub){ try{ S.unsub(); }catch(e){} S.unsub=null; } S.watchPid=null;
   window.scrollTo(0,0);
   const want = PAGE_MODE==='admin' || ADMIN_VIEWS.includes(view) ? 'admin' : (['pre','post','sat'].includes(view) && MODE==='admin' ? 'admin' : 'learner');
-  if(want!==MODE){ MODE=want; if(MODE==='admin' && !S.user) S.user=await S.store.currentUser(); drawHeader(); }
+  if(want!==MODE){ MODE=want; if(MODE==='admin' && !S.user){ S.user=await S.store.currentUser(); if(S.user) S.settings=await S.store.getSettings(); } drawHeader(); }
   try{
     if(view==='pre'||view==='post') return await renderTest(id, view);
     if(view==='sat') return await renderSurvey(id);
@@ -748,11 +764,13 @@ async function route(){
     if(view==='staff' && isAdmin()) return await renderStaff();
     if(view==='rooms' && isAdmin()) return await renderRooms();
     if(view==='password') return renderPassword();
+    if(view==='find') return await renderFind();
     if(view==='summary') return await renderSummary();
     if(view==='sumpdf') return await renderSummaryPdf(id);
     return await renderHome();
   }catch(e){
     console.error(e);
+    if(/unavailable|network|timeout|ช้าเกินไป|offline/i.test((e.code||'')+' '+e.message)) return showRetry('เชื่อมต่อฐานข้อมูลไม่ได้');
     app.innerHTML=`<div class="card"><h2>เกิดข้อผิดพลาด</h2><p>${esc(e.message||e)}</p><a class="btn ghost" href="#">กลับหน้าหลัก</a></div>`;
   }
 }
@@ -858,14 +876,16 @@ async function renderTest(id, kind){
     <div class="row" style="margin-bottom:8px">${backLink(id).replace('กลับไปหน้าโครงการ','← กลับ')}</div>
     <div class="card"><div class="muted small">${label}${staffEntry?' · <b>ครูบันทึกแทนผู้เรียน</b>':''}</div><h1>${esc(d.title)}</h1><div class="muted small">${Q.length} ข้อ · เลือกคำตอบที่ถูกที่สุดเพียงข้อเดียว</div></div>
     <h3>ข้อมูลผู้เรียน</h3>
-    ${learnerFields(classes, staffEntry?{}:savedInfo(), {sid:true})}
+    ${!staffEntry&&!S.fresh&&savedInfo().name?`<div class="note" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">เครื่องนี้กรอกข้อมูลของ <b>${esc((savedInfo().prefix||'')+savedInfo().name)}</b> ไว้ให้ <span class="spacer"></span><button type="button" class="btn ghost sm" id="clearMe">👥 ไม่ใช่ฉัน / ให้คนอื่นทำ</button></div>`:''}
+    ${learnerFields(classes, S.prefill || (staffEntry||S.fresh?{}:savedInfo()), {sid:true})}
     <h3>คำถาม</h3>
     ${(()=>{ const L=testLayout(id,kind,d.test,staffEntry); return L.qOrder.map((i,k)=>{ const q=Q[i];
       return `<div class="q" data-req="a${i}"><div class="qt">${k+1}. ${esc(q.q)}</div><div class="opts">
       ${L.optOrders[i].map((j,m)=>`<input type="radio" name="a${i}" id="a${i}_${j}" value="${j}"><label for="a${i}_${j}"><i>${OPT_LABELS[m]||m+1}.</i><span>${esc(q.opts[j])}</span></label>`).join('')}</div></div>`; }).join(''); })()}
     <div class="row" style="margin:16px 0"><button class="btn" id="tbtn" style="font-size:17px;padding:10px 26px">ส่งคำตอบ</button><span class="err" id="terr"></span></div>
   </form>`;
-  const f=$('#tf'); bindLearnerFields(f);
+  const f=$('#tf'); bindLearnerFields(f); S.fresh=false; S.prefill=null;
+  if($('#clearMe')) $('#clearMe').onclick=()=>{ S.fresh=true; renderTest(id,kind); };
   f.onsubmit=async e=>{
     e.preventDefault();
     const first=checkRequired(f);
@@ -880,10 +900,14 @@ async function renderTest(id, kind){
       const key=d.test.key; let scoreHtml='';
       if(key){ const sc=answers.reduce((s,a,i)=>s+(a===key[i]?1:0),0); const pc=pct(sc,Q.length);
         scoreHtml=`<div class="scorebig">${sc} / ${Q.length}</div><p>คิดเป็นร้อยละ ${f2(pc)} ${kind==='post'?(pc>=d.test.passPct?'· <b class="opt-ok">ผ่านเกณฑ์</b>':'· ยังไม่ผ่านเกณฑ์'):''}</p>`; }
-      app.innerHTML=`<div class="card sv" style="text-align:center;padding:36px 20px"><div style="font-size:44px">${kind==='pre'?'📝':'🎉'}</div>
+      const failed = kind==='post' && key && pct(answers.reduce((s,a,i)=>s+(a===key[i]?1:0),0),Q.length) < d.test.passPct;
+      app.innerHTML=`<div class="card sv" style="text-align:center;padding:36px 20px"><div style="font-size:44px">${failed?'📚':kind==='pre'?'📝':'🎉'}</div>
         <h2>ส่ง${label}แล้ว</h2><p class="muted">${esc(info.prefix+info.name)} · รหัส ${esc(info.sid)}</p>${scoreHtml}
-        <div class="row" style="justify-content:center;margin-top:10px">${staffEntry?`<button class="btn ghost" id="again">บันทึกของผู้เรียนคนถัดไป</button>`:''}${backLink(id)}</div></div>`;
-      if($('#again')) $('#again').onclick=()=>renderTest(id,kind);
+        ${failed?`<div class="note" style="text-align:left;font-size:15.5px">ยังไม่ถึงเกณฑ์ร้อยละ ${d.test.passPct} — ทบทวนเนื้อหากับครูแล้ว<b>ทำแบบทดสอบหลังเรียนใหม่ได้</b> ระบบจะใช้ผลครั้งล่าสุด</div>
+          <button class="btn" id="retry" style="background:#b4541f;border-color:#b4541f;margin-bottom:8px">🔁 ทำแบบทดสอบหลังเรียนอีกครั้ง</button>`:''}
+        <div class="row" style="justify-content:center;margin-top:10px">${staffEntry?`<button class="btn ghost" id="again">บันทึกของผู้เรียนคนถัดไป</button>`:`<button class="btn" id="again">👥 ให้คนถัดไปทำต่อ (เครื่องนี้)</button>`}${backLink(id)}</div></div>`;
+      if($('#again')) $('#again').onclick=()=>{ S.fresh=true; renderTest(id,kind); };
+      if($('#retry')) $('#retry').onclick=()=>{ if(staffEntry) S.prefill=info; renderTest(id,'post'); };
       window.scrollTo(0,0);
     }catch(err){ $('#tbtn').disabled=false; $('#terr').textContent='ส่งไม่สำเร็จ กรุณาลองใหม่ ('+err.message+')'; }
   };
@@ -897,14 +921,15 @@ async function renderSurvey(id){
   if(isExpired(d) && !staffEntry){ app.innerHTML=`<div class="card sv"><h2>${esc(d.title)}</h2><p>แบบประเมินนี้ปิดรับแล้ว เนื่องจากเลยวันจัดกิจกรรมมาเกิน 3 วัน</p>${backLink(id)}</div>`; return; }
   if(!d.sat.open && !staffEntry){ app.innerHTML=`<div class="card sv"><h2>${esc(d.title)}</h2><p>แบบประเมินนี้ปิดรับคำตอบแล้ว ขอบคุณที่ให้ความสนใจ</p>${backLink(id)}</div>`; return; }
   let qi=0;
-  const saved=staffEntry?{}:savedInfo();
+  const saved=staffEntry||S.fresh?{}:savedInfo();
   if(!saved.gender && saved.prefix) saved.gender=PREFIX_GENDER[saved.prefix];
   app.innerHTML=`<form class="sv" id="sf" novalidate>
     <div class="row" style="margin-bottom:8px">${backLink(id).replace('กลับไปหน้าโครงการ','← กลับ')}</div>
     <div class="card"><div class="muted small">แบบประเมินความพึงพอใจ${staffEntry?' · <b>ครูบันทึกจากแบบประเมินกระดาษ</b>':''}</div><h1>${esc(d.title)}</h1>
       <div class="muted small">${esc(d.dateText)}${d.location?' · '+esc(d.location):''}</div></div>
     <h3>ตอนที่ 1 ข้อมูลผู้ตอบแบบประเมิน</h3>
-    ${learnerFields(classes, saved, {gender:true, age:true})}
+    ${!staffEntry&&!S.fresh&&saved.name?`<div class="note" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">เครื่องนี้กรอกข้อมูลของ <b>${esc((saved.prefix||'')+saved.name)}</b> ไว้ให้ <span class="spacer"></span><button type="button" class="btn ghost sm" id="clearMe">👥 ไม่ใช่ฉัน / ให้คนอื่นทำ</button></div>`:''}
+    ${learnerFields(classes, S.fresh?{}:saved, {gender:true, age:true})}
     <h3>ตอนที่ 2 ความพึงพอใจต่อโครงการ</h3>
     <p class="muted small" style="margin-top:0">5 = มากที่สุด · 4 = มาก · 3 = ปานกลาง · 2 = น้อย · 1 = น้อยที่สุด</p>
     ${d.sat.items.map(it=>{ if(it.t==='h') return `<div style="font-weight:700;margin:14px 0 6px">${esc(it.text)}</div>`;
@@ -914,7 +939,8 @@ async function renderSurvey(id){
     <div class="q"><textarea name="comment" maxlength="2000" placeholder="(ไม่บังคับ)"></textarea></div>
     <div class="row" style="margin:16px 0"><button class="btn" id="sbtn" style="font-size:17px;padding:10px 26px">ส่งแบบประเมิน</button><span class="err" id="serr"></span></div>
   </form>`;
-  const nq=qi; const f=$('#sf'); bindLearnerFields(f);
+  const nq=qi; const f=$('#sf'); bindLearnerFields(f); S.fresh=false;
+  if($('#clearMe')) $('#clearMe').onclick=()=>{ S.fresh=true; renderSurvey(id); };
   f.onsubmit=async e=>{
     e.preventDefault();
     const first=checkRequired(f);
@@ -927,8 +953,8 @@ async function renderSurvey(id){
     try{
       await S.store.addResponse(id,r); if(!staffEntry){ saveInfo(info); markDone(id,'sat'); }
       app.innerHTML=`<div class="card sv" style="text-align:center;padding:40px 20px"><div style="font-size:48px">🙏</div><h2>ขอบคุณที่ตอบแบบประเมิน</h2>
-        <p class="muted">${esc(d.title)}</p><div class="row" style="justify-content:center">${staffEntry?'<button class="btn ghost" id="again">บันทึกของผู้เข้าร่วมคนถัดไป</button>':''}${backLink(id)}</div></div>`;
-      if($('#again')) $('#again').onclick=()=>renderSurvey(id); window.scrollTo(0,0);
+        <p class="muted">${esc(d.title)}</p><div class="row" style="justify-content:center">${staffEntry?'<button class="btn ghost" id="again">บันทึกของผู้เข้าร่วมคนถัดไป</button>':'<button class="btn" id="again">👥 ให้คนถัดไปทำต่อ (เครื่องนี้)</button>'}${backLink(id)}</div></div>`;
+      if($('#again')) $('#again').onclick=()=>{ S.fresh=true; renderSurvey(id); }; window.scrollTo(0,0);
     }catch(err){ $('#sbtn').disabled=false; $('#serr').textContent='ส่งไม่สำเร็จ กรุณาลองใหม่ ('+err.message+')'; }
   };
 }
@@ -1148,6 +1174,46 @@ async function renderRooms(){
     const clean=list.map(c=>({center:c.center.trim(),teacher:c.teacher.trim().replace(/^ครู\s*/,'')})).filter(c=>c.center);
     await S.store.saveClasses(clean); list=clean; draw(); toast(`บันทึกแล้ว ${clean.length} ห้องเรียน`);
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* ค้นหาผู้เรียน (ชื่อ / รหัสนักศึกษา) ในทุกโครงการ                      */
+/* ------------------------------------------------------------------ */
+async function renderFind(){
+  app.innerHTML=`<h1>🔍 ค้นหาผู้เรียน</h1><p class="muted">ค้นจากชื่อ นามสกุล หรือรหัสนักศึกษา ในแบบทดสอบก่อน/หลังเรียน และแบบประเมินความพึงพอใจของทุกโครงการ</p>
+    <div class="card"><div class="row"><input type="search" id="fq" placeholder="พิมพ์ชื่อ หรือรหัสนักศึกษา อย่างน้อย 2 ตัวอักษร" style="flex:1;min-width:220px;font-size:17px">
+      <select id="ffy" style="width:auto"></select><select id="fk" style="width:auto"><option value="">ทุกประเภท</option><option value="pre">ก่อนเรียน</option><option value="post">หลังเรียน</option><option value="sat">ประเมินความพึงพอใจ</option></select></div>
+      <div class="muted small" id="fmsg" style="margin-top:8px">กำลังรวบรวมข้อมูล…</div></div>
+    <div class="card" style="overflow-x:auto"><div id="fres"></div></div>`;
+  const ps=await S.store.listProjects();
+  const years=yearList(await S.store.getYears(), ps);
+  $('#ffy').innerHTML='<option value="">ทุกปีงบประมาณ</option>'+years.map(y=>`<option value="${esc(y)}">${esc(y)}</option>`).join('');
+  const rows=[];
+  await Promise.all(ps.map(async p=>{
+    const [resps,trows]=await Promise.all([S.store.listResponses(p.id),S.store.listTests(p.id)]);
+    const N=(p.test?.questions||[]).length, Q=p.test?.questions||[];
+    trows.forEach(r=>{ const sc=Q.reduce((a,q,i)=>a+((r.answers||[])[i]===q.ans?1:0),0);
+      rows.push({kind:r.kind,name:r.name||'',sid:r.sid||'',room:r.room||'',level:r.level||'',at:r.at,p,result:N?`${sc}/${N} (${f2(pct(sc,N))}%)`:'-'}); });
+    resps.forEach(r=>{ const m=msd((r.scores||[]).filter(x=>x>=1&&x<=5)).mean;
+      rows.push({kind:'sat',name:r.name||'',sid:'',room:r.room||'',level:r.level||'',at:r.at,p,result:m?`x̄ ${f2(m)} (${level(m)})`:'-'}); });
+  }));
+  rows.sort((a,b)=>b.at-a.at);
+  $('#fmsg').textContent=`มีข้อมูลทั้งหมด ${rows.length.toLocaleString('th-TH')} รายการ จาก ${ps.length} โครงการ`;
+  const KL={pre:'ก่อนเรียน',post:'หลังเรียน',sat:'ประเมินความพึงพอใจ'};
+  const draw=()=>{
+    const q=$('#fq').value.trim().toLowerCase().replace(/\s+/g,''), fy=$('#ffy').value, k=$('#fk').value;
+    if(q.length<2){ $('#fres').innerHTML='<div class="empty">พิมพ์ชื่อหรือรหัสนักศึกษาเพื่อค้นหา</div>'; return; }
+    const hit=rows.filter(r=>(!fy||String(r.p.fiscalYear)===fy)&&(!k||r.kind===k)&&(nameKey(r.name).includes(nameKey(q))||r.name.toLowerCase().replace(/\s+/g,'').includes(q)||String(r.sid).includes(q)));
+    $('#fres').innerHTML=hit.length?`<div class="muted small" style="margin-bottom:6px">พบ ${hit.length} รายการ</div>
+      <table class="t"><thead><tr><th>ชื่อ-สกุล</th><th>รหัส</th><th>ประเภท</th><th>ผล</th><th>โครงการ</th><th>ห้องเรียน</th><th>วันที่ส่ง</th></tr></thead><tbody>
+      ${hit.slice(0,300).map(r=>`<tr class="link" data-id="${esc(r.p.id)}"><td><b>${esc(r.name)}</b></td><td class="small">${esc(r.sid)}</td>
+        <td><span class="pill ${r.kind==='sat'?'gray':''}">${KL[r.kind]}</span></td><td class="small">${esc(r.result)}</td>
+        <td class="small">${esc(r.p.name)}</td><td class="small">${esc(r.room)}</td><td class="small">${new Date(r.at).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'})}</td></tr>`).join('')}
+      </tbody></table>${hit.length>300?'<p class="muted small">แสดง 300 รายการแรก — พิมพ์ให้เจาะจงขึ้น</p>':''}`
+      :'<div class="empty">ไม่พบผู้เรียนที่ตรงกับคำค้น</div>';
+    $$('#fres tr.link').forEach(tr=>tr.onclick=()=>location.hash='p-'+tr.dataset.id);
+  };
+  $('#fq').oninput=draw; $('#ffy').onchange=draw; $('#fk').onchange=draw; draw(); $('#fq').focus();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1438,7 +1504,7 @@ function distTable(title, rows, total){
     <tr class="tot"><td>รวม</td><td class="num">${total}</td><td class="num">${total?'100.00':'-'}</td></tr></tbody></table></div>`;
 }
 async function renderProject(id, keep=false){
-  const keepY=keep?window.scrollY:0;
+  const keepY=keep?window.scrollY:0; const openDet=keep?$$('#app details').map(d=>d.open):[];
   if(!keep) app.innerHTML='<div class="empty">กำลังโหลด…</div>';
   const p=await S.store.getProject(id); if(!p) throw new Error('ไม่พบโครงการนี้');
   const [resps, photos, trows]=await Promise.all([S.store.listResponses(id), S.store.listPhotos(id), S.store.listTests(id)]);
@@ -1453,7 +1519,7 @@ async function renderProject(id, keep=false){
       <div style="flex:1;min-width:260px"><h1>${esc(p.name)}</h1>
         <div class="muted">${esc(dateRange(p))}${p.location?' · '+esc(p.location):''}</div>
         <div class="muted small">ปีงบประมาณ ${esc(p.fiscalYear||'-')} · ผู้รับผิดชอบ ${esc(p.responsible||'-')}</div></div>
-      <div class="row"><a class="btn" href="#r-${esc(id)}">📄 รายงานสรุปผล</a><a class="btn ghost" href="#edit-${esc(id)}">แก้ไข</a><button class="btn ghost danger" id="delP">ลบ</button></div>
+      <div class="row"><button class="btn ghost" id="refP" title="โหลดข้อมูลล่าสุด">🔄 รีเฟรช</button><a class="btn" href="#r-${esc(id)}">📄 รายงานสรุปผล</a><a class="btn ghost" href="#edit-${esc(id)}">แก้ไข</a><button class="btn ghost danger" id="delP">ลบ</button></div>
     </div>
     <div class="grid g4" style="margin-bottom:16px">
       <div class="stat"><div class="k">ผู้เข้าร่วมโครงการ</div><div class="v">${st.actual}${t?` <span style="font-size:16px;font-weight:400">/ ${t} คน</span>`:''}</div>
@@ -1492,10 +1558,14 @@ async function renderProject(id, keep=false){
         <tr><td>หลังเรียน</td><td class="num">${ts.post.length}</td><td class="num">${f2(ts.postS.mean)}</td><td class="num">${f2(ts.postS.sd)}</td><td class="num">${f2(ts.postS.pm)}</td><td class="num">${ts.postS.pass} (${f2(ts.postS.passP)}%)</td></tr>
         ${ts.pairs.length?`<tr class="tot"><td>ผลต่าง (ทำครบ 2 ครั้ง ${ts.pairs.length} คน)</td><td></td><td class="num">${ts.diff.mean>=0?'+':''}${f2(ts.diff.mean)}</td><td></td><td class="num">${ts.diff.mean>=0?'+':''}${f2(pct(ts.diff.mean,ts.N))}</td><td class="num">คะแนนเพิ่ม ${ts.improved} คน</td></tr>`:''}
       </tbody></table>
+      ${(()=>{ const fail=ts.learners.filter(l=>l.post!=null&&pct(l.post,ts.N)<ts.cut); if(!fail.length) return '';
+        return `<div class="note" style="margin-top:12px"><b>ยังไม่ผ่านเกณฑ์หลังเรียน ${fail.length} คน</b> — ควรสอนซ่อมเสริม/ทบทวน แล้วให้ทำแบบทดสอบหลังเรียนใหม่ (ระบบใช้ผลครั้งล่าสุด)
+          <div style="margin-top:6px">${fail.map(l=>`<span class="pill off" style="margin:2px">${esc(l.name)} · ${l.post}/${ts.N}${l.postTries>1?` · ครั้งที่ ${l.postTries}`:''}</span>`).join(' ')}</div>
+          <button class="btn ghost sm" id="cpFail" style="margin-top:8px">คัดลอกรายชื่อ</button></div>`; })()}
       <details style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">คะแนนรายบุคคล (${ts.learners.length} คน)</summary>
         <table class="t"><thead><tr><th class="c">ที่</th><th>รหัส</th><th>ชื่อ-สกุล</th><th>ห้องเรียน</th><th class="num">ก่อนเรียน</th><th class="num">หลังเรียน</th><th class="num">ผลต่าง</th><th>ผล</th><th></th></tr></thead><tbody>
         ${ts.learners.map((l,i)=>{ const d=l.pre!=null&&l.post!=null?l.post-l.pre:null; const pass=l.post!=null&&pct(l.post,ts.N)>=ts.cut;
-          return `<tr><td class="c">${i+1}</td><td class="small">${esc(l.sid)}</td><td>${esc(l.name)}</td><td class="small">${esc(l.room)}</td><td class="num">${l.pre??'-'}</td><td class="num">${l.post??'-'}</td><td class="num">${d==null?'-':(d>0?'+':'')+d}</td><td>${l.post==null?'<span class="muted">ยังไม่ทำหลังเรียน</span>':pass?'<span class="pill">ผ่าน</span>':'<span class="pill off">ไม่ผ่าน</span>'}</td><td class="num"><button class="btn ghost danger sm dell" data-k="${esc(l.key)}" data-n="${esc(l.name)}">ลบ</button></td></tr>`; }).join('')}
+          return `<tr><td class="c">${i+1}</td><td class="small">${esc(l.sid)}</td><td>${esc(l.name)}</td><td class="small">${esc(l.room)}</td><td class="num">${l.pre??'-'}</td><td class="num">${l.post??'-'}${l.postTries>1?`<div class="muted small">ทำ ${l.postTries} ครั้ง</div>`:''}</td><td class="num">${d==null?'-':(d>0?'+':'')+d}</td><td>${l.post==null?'<span class="muted">ยังไม่ทำหลังเรียน</span>':pass?'<span class="pill">ผ่าน</span>':'<span class="pill off">ไม่ผ่าน</span>'}</td><td class="num"><button class="btn ghost danger sm dell" data-k="${esc(l.key)}" data-n="${esc(l.name)}">ลบ</button></td></tr>`; }).join('')}
         </tbody></table></details>
       ${ts.rooms.length>1?`<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">สรุปรายห้องเรียน (${ts.rooms.length})</summary>
         <table class="t"><thead><tr><th>ห้องเรียน</th><th class="num">ก่อนเรียน (คน)</th><th class="num">x̄ ก่อน</th><th class="num">หลังเรียน (คน)</th><th class="num">x̄ หลัง</th></tr></thead><tbody>
@@ -1542,9 +1612,20 @@ async function renderProject(id, keep=false){
       :'<div class="empty">ยังไม่มีข้อมูล</div>'}
     </div>`;
 
-  if(keep) window.scrollTo(0,keepY);
+  if(keep){ $$('#app details').forEach((d,i)=>{ if(openDet[i]) d.open=true; }); window.scrollTo(0,keepY); }
+  if(!window.QRCode){ try{ await loadScript('https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js'); }catch(e){} }
   try{ if(window.QRCode) new QRCode($('#qrbox'),{text:joinUrl,width:180,height:180,correctLevel:QRCode.CorrectLevel.M}); else $('#qrbox').textContent='โหลด QR ไม่ได้'; }catch(e){}
   $('#cpUrl').onclick=()=>copyText(joinUrl);
+  $('#refP').onclick=()=>renderProject(id,true);
+  if($('#cpFail')) $('#cpFail').onclick=()=>copyText(ts.learners.filter(l=>l.post!=null&&pct(l.post,ts.N)<ts.cut).map((l,i)=>`${i+1}. ${l.name}${l.sid?' ('+l.sid+')':''} ได้ ${l.post}/${ts.N}`).join('\n'));
+  // อัปเดตอัตโนมัติเมื่อผู้เรียนส่งข้อมูลเข้ามา
+  if(S.watchPid!==id){
+    if(S.unsub){ try{ S.unsub(); }catch(e){} }
+    S.watchPid=id; let t=null;
+    S.unsub=S.store.watchProject(id, ()=>{ clearTimeout(t); t=setTimeout(()=>{
+      if(location.hash!=='#p-'+id || $('.modal') || document.activeElement?.closest('#phs')) return;
+      toast('📥 มีข้อมูลใหม่จากผู้เรียน'); renderProject(id,true); },700); });
+  }
   $('#cpSum').onclick=()=>copyText(summary);
   $$('.tog').forEach(b=>b.onclick=async()=>{
     const k=b.dataset.k;
