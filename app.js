@@ -1142,7 +1142,7 @@ async function renderSummaryPdf(fyKey){
     {k:'space',n:1},
     {k:'raw',html:`<p class="rp-p">จำนวนโครงการทั้งหมด ${t.n} โครงการ มีผู้เข้าร่วมโครงการรวม ${t.people.toLocaleString('th-TH')} คน${t.target?` จากเป้าหมาย ${t.target.toLocaleString('th-TH')} คน คิดเป็นร้อยละ ${f2(pct(t.people,t.target))}`:''} ได้รับงบประมาณรวม ${money(t.bp)} บาท ใช้จ่ายจริง ${money(t.bs)} บาท คิดเป็นร้อยละ ${f2(pct(t.bs,t.bp))} คงเหลือ ${money(t.bp-t.bs)} บาท${t.satAvg!=null?` ความพึงพอใจเฉลี่ยของผู้เข้าร่วมทุกโครงการอยู่ในระดับ${level(t.satAvg)} (x̄ = ${f2(t.satAvg)})`:''}</p>`},
     {k:'table',head:['ที่','โครงการ','วันที่','สถานที่','ผู้รับผิดชอบ','ผู้เข้าร่วม (คน)','งบได้รับ (บาท)','ใช้จริง (บาท)','พึงพอใจ x̄'],
-      widths:[4,23,13,15,12,8,9.5,9.5,6],align:['c','l','l','l','l','c','r','r','c'],
+      widths:[5,22,13,15,12,8,9.5,9.5,6],align:['c','l','l','l','l','c','r','r','c'],
       rows:[...rows.map(({i,p,d})=>[i,p.name,dateOnly(p).replace(/^วันที่ /,''),p.location||'-',p.responsible||'-',`${d.st.actual}${num(p.targetQty)?' / '+num(p.targetQty):''}`,money(p.budgetPlanned),money(p.budgetSpent),d.st.n?f2(d.st.overall.mean):'-']),
         ['','รวม '+t.n+' โครงการ','','','',`${t.people}${t.target?' / '+t.target:''}`,money(t.bp),money(t.bs),t.satAvg!=null?f2(t.satAvg):'-']],
       bold:[rows.length]}
@@ -1771,7 +1771,7 @@ function buildReport(p, st, ts, photos, resps, set){
     add('p',{text:`จากตารางที่ ${tn} `+testText(ts).replace(/^ผลการทดสอบความรู้ \(คะแนนเต็ม \d+ คะแนน\) พบว่า /,'พบว่า ')});
     if(ts.learners.length){
       cap('คะแนนการทดสอบก่อนเรียนและหลังเรียนรายบุคคล');
-      add('table',{head:['ที่','รหัส','ชื่อ-สกุล','ก่อน','หลัง','ผลต่าง','ผล'],widths:[6,21,37,9,9,9,9],align:['c','c','l','c','c','c','c'],
+      add('table',{head:['ที่','รหัส','ชื่อ-สกุล','ก่อน','หลัง','ผลต่าง','ผล'],widths:[8,20,35,9,9,9,10],align:['c','c','l','c','c','c','c'],
         rows:ts.learners.map((l,i)=>{ const d=l.pre!=null&&l.post!=null?l.post-l.pre:null;
           return [i+1,l.sid||'-',l.name,l.pre??'-',l.post??'-',d==null?'-':(d>0?'+':'')+d,l.post==null?'-':(pct(l.post,ts.N)>=ts.cut?'ผ่าน':'ไม่ผ่าน')]; })});
     }
