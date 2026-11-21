@@ -641,7 +641,9 @@ function testStats(p, rows){
   const sc=r=>Q.reduce((s,q,i)=>s+((r.answers||[])[i]===q.ans?1:0),0);
   const lk=learnerKey;
   const tries={}; rows.forEach(r=>{ const k=r.kind+'|'+lk(r); tries[k]=(tries[k]||0)+1; });
-  const latest=k=>{ const m=new Map(); rows.filter(r=>r.kind===k).sort((a,b)=>a.at-b.at).forEach(r=>m.set(lk(r),{...r,score:sc(r)})); return [...m.values()]; };
+  // ก่อนเรียน: ใช้ครั้งล่าสุด · หลังเรียน: ใช้คะแนนครั้งที่ดีที่สุด (ทำซ้ำได้ไม่จำกัด)
+  const latest=k=>{ const m=new Map(); rows.filter(r=>r.kind===k).sort((a,b)=>a.at-b.at).forEach(r=>{ const x={...r,score:sc(r)}, cur=m.get(lk(r));
+    if(k==='post' && cur && cur.score>x.score) return; m.set(lk(r),x); }); return [...m.values()]; };
   const pre=latest('pre'), post=latest('post');
   const sum=a=>{ const s=msd(a.map(x=>x.score)); const pass=a.filter(x=>N&&pct(x.score,N)>=cut).length; return {...s,pm:pct(s.mean,N),pass,passP:pct(pass,a.length)}; };
   const preM=new Map(pre.map(x=>[lk(x),x])), postM=new Map(post.map(x=>[lk(x),x]));
@@ -720,7 +722,7 @@ function drawHeader(){
   if(!mb){ mb=document.createElement('nav'); mb.id='menubar'; mb.className='menubar'; h.after(mb); }
   mb.innerHTML=''; mb.style.display='none';
   if(MODE==='learner'){
-    h.innerHTML=`${!S.firebase?'<span class="badge" style="position:absolute;right:10px;top:6px;z-index:3;background:#b23a3a">โหมดทดลอง</span>':''}<img class="logo" src="logo.png" alt=""><div class="brand brand-lg"><span class="shine"><span class="shine-text">${esc(org)}</span></span><small>แบบทดสอบและแบบประเมินสำหรับผู้เรียน</small></div>`;
+    h.innerHTML=`${!S.firebase?'<span class="badge" style="position:absolute;right:8px;bottom:6px;z-index:3;background:#b23a3a;font-size:11px">โหมดทดลอง</span>':''}<img class="logo" src="logo.png" alt=""><div class="brand brand-lg"><span class="shine"><span class="shine-text">${esc(org)}</span></span><small>แบบทดสอบและแบบประเมินสำหรับผู้เรียน</small></div>`;
     return;
   }
   h.innerHTML=`<img class="logo" src="logo.png" alt=""><div class="brand">ระบบสรุปผลการดำเนินโครงการ<small>${esc(org)}</small></div>
@@ -901,10 +903,11 @@ async function renderTest(id, kind){
       if(key){ const sc=answers.reduce((s,a,i)=>s+(a===key[i]?1:0),0); const pc=pct(sc,Q.length);
         scoreHtml=`<div class="scorebig">${sc} / ${Q.length}</div><p>คิดเป็นร้อยละ ${f2(pc)} ${kind==='post'?(pc>=d.test.passPct?'· <b class="opt-ok">ผ่านเกณฑ์</b>':'· ยังไม่ผ่านเกณฑ์'):''}</p>`; }
       const failed = kind==='post' && key && pct(answers.reduce((s,a,i)=>s+(a===key[i]?1:0),0),Q.length) < d.test.passPct;
-      app.innerHTML=`<div class="card sv" style="text-align:center;padding:36px 20px"><div style="font-size:44px">${failed?'📚':kind==='pre'?'📝':'🎉'}</div>
+      app.innerHTML=`<div class="card sv" style="text-align:center;padding:36px 20px"><div style="font-size:44px">${failed?'📚':kind==='pre'?'📝':'🏆'}</div>
         <h2>ส่ง${label}แล้ว</h2><p class="muted">${esc(info.prefix+info.name)} · รหัส ${esc(info.sid)}</p>${scoreHtml}
-        ${failed?`<div class="note" style="text-align:left;font-size:15.5px">ยังไม่ถึงเกณฑ์ร้อยละ ${d.test.passPct} — ทบทวนเนื้อหากับครูแล้ว<b>ทำแบบทดสอบหลังเรียนใหม่ได้</b> ระบบจะใช้ผลครั้งล่าสุด</div>
-          <button class="btn" id="retry" style="background:#b4541f;border-color:#b4541f;margin-bottom:8px">🔁 ทำแบบทดสอบหลังเรียนอีกครั้ง</button>`:''}
+        ${failed?`<div class="resmsg fail">ทำแบบทดสอบหลังเรียนใหม่อีกครั้ง</div>
+          <button class="btn" id="retry" style="background:#b4541f;border-color:#b4541f;margin-bottom:8px;font-size:17px;padding:10px 26px">🔁 ทำอีกครั้ง</button>`
+         : (kind==='post' && key ? `<div class="resmsg pass">🎉 ยินดีด้วย ทำแบบทดสอบหลังเรียนผ่านแล้ว</div>` : '')}
         <div class="row" style="justify-content:center;margin-top:10px">${staffEntry?`<button class="btn ghost" id="again">บันทึกของผู้เรียนคนถัดไป</button>`:`<button class="btn" id="again">👥 ให้คนถัดไปทำต่อ (เครื่องนี้)</button>`}${backLink(id)}</div></div>`;
       if($('#again')) $('#again').onclick=()=>{ S.fresh=true; renderTest(id,kind); };
       if($('#retry')) $('#retry').onclick=()=>{ if(staffEntry) S.prefill=info; renderTest(id,'post'); };
@@ -1559,13 +1562,13 @@ async function renderProject(id, keep=false){
         ${ts.pairs.length?`<tr class="tot"><td>ผลต่าง (ทำครบ 2 ครั้ง ${ts.pairs.length} คน)</td><td></td><td class="num">${ts.diff.mean>=0?'+':''}${f2(ts.diff.mean)}</td><td></td><td class="num">${ts.diff.mean>=0?'+':''}${f2(pct(ts.diff.mean,ts.N))}</td><td class="num">คะแนนเพิ่ม ${ts.improved} คน</td></tr>`:''}
       </tbody></table>
       ${(()=>{ const fail=ts.learners.filter(l=>l.post!=null&&pct(l.post,ts.N)<ts.cut); if(!fail.length) return '';
-        return `<div class="note" style="margin-top:12px"><b>ยังไม่ผ่านเกณฑ์หลังเรียน ${fail.length} คน</b> — ควรสอนซ่อมเสริม/ทบทวน แล้วให้ทำแบบทดสอบหลังเรียนใหม่ (ระบบใช้ผลครั้งล่าสุด)
+        return `<div class="note" style="margin-top:12px"><b>ยังไม่ผ่านเกณฑ์หลังเรียน ${fail.length} คน</b> — ควรสอนซ่อมเสริม/ทบทวน แล้วให้ทำแบบทดสอบหลังเรียนใหม่ได้ไม่จำกัดครั้ง (ระบบใช้คะแนนครั้งที่ดีที่สุด)
           <div style="margin-top:6px">${fail.map(l=>`<span class="pill off" style="margin:2px">${esc(l.name)} · ${l.post}/${ts.N}${l.postTries>1?` · ครั้งที่ ${l.postTries}`:''}</span>`).join(' ')}</div>
           <button class="btn ghost sm" id="cpFail" style="margin-top:8px">คัดลอกรายชื่อ</button></div>`; })()}
       <details style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">คะแนนรายบุคคล (${ts.learners.length} คน)</summary>
         <table class="t"><thead><tr><th class="c">ที่</th><th>รหัส</th><th>ชื่อ-สกุล</th><th>ห้องเรียน</th><th class="num">ก่อนเรียน</th><th class="num">หลังเรียน</th><th class="num">ผลต่าง</th><th>ผล</th><th></th></tr></thead><tbody>
         ${ts.learners.map((l,i)=>{ const d=l.pre!=null&&l.post!=null?l.post-l.pre:null; const pass=l.post!=null&&pct(l.post,ts.N)>=ts.cut;
-          return `<tr><td class="c">${i+1}</td><td class="small">${esc(l.sid)}</td><td>${esc(l.name)}</td><td class="small">${esc(l.room)}</td><td class="num">${l.pre??'-'}</td><td class="num">${l.post??'-'}${l.postTries>1?`<div class="muted small">ทำ ${l.postTries} ครั้ง</div>`:''}</td><td class="num">${d==null?'-':(d>0?'+':'')+d}</td><td>${l.post==null?'<span class="muted">ยังไม่ทำหลังเรียน</span>':pass?'<span class="pill">ผ่าน</span>':'<span class="pill off">ไม่ผ่าน</span>'}</td><td class="num"><button class="btn ghost danger sm dell" data-k="${esc(l.key)}" data-n="${esc(l.name)}">ลบ</button></td></tr>`; }).join('')}
+          return `<tr><td class="c">${i+1}</td><td class="small">${esc(l.sid)}</td><td>${esc(l.name)}</td><td class="small">${esc(l.room)}</td><td class="num">${l.pre??'-'}</td><td class="num">${l.post??'-'}${l.postTries>1?`<div class="muted small">ดีที่สุดจาก ${l.postTries} ครั้ง</div>`:''}</td><td class="num">${d==null?'-':(d>0?'+':'')+d}</td><td>${l.post==null?'<span class="muted">ยังไม่ทำหลังเรียน</span>':pass?'<span class="pill">ผ่าน</span>':'<span class="pill off">ไม่ผ่าน</span>'}</td><td class="num"><button class="btn ghost danger sm dell" data-k="${esc(l.key)}" data-n="${esc(l.name)}">ลบ</button></td></tr>`; }).join('')}
         </tbody></table></details>
       ${ts.rooms.length>1?`<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">สรุปรายห้องเรียน (${ts.rooms.length})</summary>
         <table class="t"><thead><tr><th>ห้องเรียน</th><th class="num">ก่อนเรียน (คน)</th><th class="num">x̄ ก่อน</th><th class="num">หลังเรียน (คน)</th><th class="num">x̄ หลัง</th></tr></thead><tbody>
