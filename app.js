@@ -346,37 +346,102 @@ class LocalStore{
 }
 
 /* ------------------------------------------------------------------ */
-/* ชั้นข้อมูล: Firebase (Firestore + Authentication)                   */
+/* เชื่อมต่อ Firestore ผ่าน REST API (fetch ธรรมดา)                     */
+/* เร็วและเสถียรบนมือถือ/แอป LINE กว่า SDK แบบสตรีม และหน้าผู้เรียนไม่ต้อง */
+/* โหลดไลบรารี Firebase เลย                                              */
 /* ------------------------------------------------------------------ */
+const fsEnc=v=>{ if(v===null||v===undefined||(typeof v==='number'&&!isFinite(v))) return {nullValue:null};
+  if(typeof v==='boolean') return {booleanValue:v};
+  if(typeof v==='number') return Number.isInteger(v)?{integerValue:String(v)}:{doubleValue:v};
+  if(typeof v==='string') return {stringValue:v};
+  if(Array.isArray(v)) return {arrayValue:{values:v.map(fsEnc)}};
+  if(typeof v==='object') return {mapValue:{fields:fsFields(v)}};
+  return {stringValue:String(v)}; };
+const fsFields=o=>{ const f={}; for(const [k,v] of Object.entries(o||{})) if(v!==undefined) f[k]=fsEnc(v); return f; };
+const fsDec=v=>{ if(!v||'nullValue' in v) return null; if('booleanValue' in v) return v.booleanValue; if('integerValue' in v) return Number(v.integerValue);
+  if('doubleValue' in v) return Number(v.doubleValue); if('stringValue' in v) return v.stringValue; if('timestampValue' in v) return Date.parse(v.timestampValue);
+  if('arrayValue' in v) return (v.arrayValue.values||[]).map(fsDec); if('mapValue' in v) return fsDecFields(v.mapValue.fields); return null; };
+const fsDecFields=f=>{ const o={}; for(const k in (f||{})) o[k]=fsDec(f[k]); return o; };
+const fsDoc=d=>({id:decodeURIComponent(d.name.split('/').pop()), ...fsDecFields(d.fields)});
+const fsPath=p=>p.split('/').map(encodeURIComponent).join('/');
+const fsFieldPath=parts=>parts.map(p=>/^[A-Za-z_][A-Za-z_0-9]*$/.test(p)?p:'`'+p.replace(/\\/g,'\\\\').replace(/`/g,'\\`')+'`').join('.');
+
+class FsRest{
+  constructor(cfg, tokenFn){ this.base=`https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents`; this.tokenFn=tokenFn; }
+  async req(method, url, body, token){
+    const tk = token!==undefined ? token : await this.tokenFn();
+    const headers={}; if(body) headers['Content-Type']='application/json'; if(tk) headers.Authorization='Bearer '+tk;
+    const ctl=new AbortController(); const timer=setTimeout(()=>ctl.abort(),25000);
+    let res;
+    try{ res=await fetch(url,{method,headers,body:body?JSON.stringify(body):undefined,signal:ctl.signal,cache:'no-store'}); }
+    catch(e){ const err=new Error(e.name==='AbortError'?'เชื่อมต่อช้าเกินไป':'เชื่อมต่ออินเทอร์เน็ตไม่ได้'); err.code='unavailable'; throw err; }
+    finally{ clearTimeout(timer); }
+    if(res.status===404 && method==='GET') return null;
+    const j=await res.json().catch(()=>({}));
+    if(!res.ok){ const st=(Array.isArray(j)?j[0]:j)?.error?.status||'';
+      const err=new Error(st==='PERMISSION_DENIED'?'ไม่มีสิทธิ์ทำรายการนี้ (permission-denied)':((Array.isArray(j)?j[0]:j)?.error?.message||('HTTP '+res.status)));
+      err.code=st==='PERMISSION_DENIED'?'permission-denied':(res.status>=500?'unavailable':st.toLowerCase()); throw err; }
+    return j;
+  }
+  async get(path, tk){ const j=await this.req('GET', this.base+'/'+fsPath(path), null, tk); return j?fsDoc(j):null; }
+  async list(col, tk){ const out=[]; let page='';
+    do{ const j=await this.req('GET', `${this.base}/${fsPath(col)}?pageSize=300${page?'&pageToken='+encodeURIComponent(page):''}`, null, tk);
+      (j?.documents||[]).forEach(d=>out.push(fsDoc(d))); page=j?.nextPageToken||''; }while(page);
+    return out; }
+  async set(path, data, tk){ return this.req('PATCH', this.base+'/'+fsPath(path), {fields:fsFields(data)}, tk); }
+  /* อัปเดตเฉพาะบางฟิลด์ (fieldPaths = [['members','x@y'], ['caption']]); ฟิลด์ที่ไม่มีใน data จะถูกลบ */
+  async patch(path, data, fieldPaths, tk){
+    const q=fieldPaths.map(fp=>'updateMask.fieldPaths='+encodeURIComponent(fsFieldPath(fp))).join('&');
+    return this.req('PATCH', `${this.base}/${fsPath(path)}?${q}`, {fields:fsFields(data)}, tk); }
+  async add(col, data, tk){ const j=await this.req('POST', this.base+'/'+fsPath(col), {fields:fsFields(data)}, tk); return fsDoc(j); }
+  async del(path, tk){ return this.req('DELETE', this.base+'/'+fsPath(path), null, tk); }
+  async query(col, where, tk){
+    const sq={from:[{collectionId:col}]}; if(where) sq.where={fieldFilter:{field:{fieldPath:where[0]},op:where[1],value:fsEnc(where[2])}};
+    const j=await this.req('POST', this.base+':runQuery', {structuredQuery:sq}, tk);
+    return (j||[]).filter(x=>x.document).map(x=>fsDoc(x.document)); }
+  async count(parent, col, tk){
+    const j=await this.req('POST', `${this.base}/${fsPath(parent)}:runAggregationQuery`,
+      {structuredAggregationQuery:{structuredQuery:{from:[{collectionId:col}]},aggregations:[{alias:'n',count:{}}]}}, tk);
+    return Number(j?.[0]?.result?.aggregateFields?.n?.integerValue||0); }
+}
+const newId=()=>{ const c='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; let s=''; const r=crypto.getRandomValues(new Uint8Array(20)); for(const x of r) s+=c[x%62]; return s; };
+/* ทำงานซ้ำเป็นระยะ เฉพาะตอนที่หน้าจอเปิดอยู่ (ประหยัดเน็ตและโควตา) */
+function poll(fn, ms){ let stop=false; const tick=async()=>{ if(stop) return; if(document.visibilityState!=='hidden'){ try{ await fn(); }catch(e){} } if(!stop) t=setTimeout(tick,ms); };
+  let t=setTimeout(tick,0); const vis=()=>{ if(document.visibilityState==='visible'&&!stop){ clearTimeout(t); tick(); } };
+  document.addEventListener('visibilitychange',vis); return ()=>{ stop=true; clearTimeout(t); document.removeEventListener('visibilitychange',vis); }; }
+
 class FireStore{
   async init(){
-    const b=`https://www.gstatic.com/firebasejs/${FB_VER}/`;
-    await loadScript(b+'firebase-app-compat.js');
-    await Promise.all([loadScript(b+'firebase-auth-compat.js'), loadScript(b+'firebase-firestore-compat.js')]);
-    firebase.initializeApp(FIREBASE_CONFIG);
-    this.db=firebase.firestore(); this.auth=firebase.auth();
-    // ใช้ long polling: เสถียรกว่าบนมือถือ เครือข่ายมือถือ และเบราว์เซอร์ในแอป (LINE/Facebook)
-    // ไม่เปิดแคชออฟไลน์ (IndexedDB) เพราะบน iPhone บางรุ่นทำให้ค้างที่ "กำลังโหลด" และทำให้ครูเห็นข้อมูลเก่า
-    try{ this.db.settings({experimentalForceLongPolling:true, merge:true}); }catch(e){}
+    this.r=new FsRest(FIREBASE_CONFIG, async()=>{ try{ return this.auth?.currentUser ? await this.auth.currentUser.getIdToken() : null; }catch(e){ return null; } });
     this.members=null;
+    if(PAGE_MODE==='admin') await this.ensureAuth();
   }
-  P(){ return this.db.collection('projects'); }
-  staffRef(db=this.db){ return db.collection('meta').doc('staff'); }
+  /* โหลดเฉพาะ Firebase Authentication (เล็กกว่าการโหลด Firestore SDK มาก) */
+  async ensureAuth(){
+    if(this.auth) return;
+    const b=`https://www.gstatic.com/firebasejs/${FB_VER}/`;
+    await loadScript(b+'firebase-app-compat.js'); await loadScript(b+'firebase-auth-compat.js');
+    if(!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    this.auth=firebase.auth();
+  }
   sec(){ return firebase.apps.find(a=>a.name==='sec') || firebase.initializeApp(FIREBASE_CONFIG,'sec'); }
   waitAuth(){ return new Promise(res=>{ const un=this.auth.onAuthStateChanged(u=>{ un(); res(u); }); }); }
   hasStaff(){ return true; }
+  async loadMembers(tk){ const d=await this.r.get('meta/staff',tk); return d?.members||{}; }
   async currentUser(){
+    await this.ensureAuth();
     const u=this.auth.currentUser || await this.waitAuth(); if(!u) return null;
-    try{ const d=await this.staffRef().get(); this.members=d.exists?d.data().members||{}:{}; }catch(e){ this.members={}; }
+    try{ this.members=await this.loadMembers(); }catch(e){ if(e.code==='unavailable') throw e; this.members={}; }
     let key=u.email;
-    if(!this.members[key]){ try{ const a=await this.db.collection('aliases').doc(u.email).get(); if(a.exists) key=a.data().key; }catch(e){} }
+    if(!this.members[key]){ try{ const a=await this.r.get('aliases/'+u.email); if(a) key=a.key; }catch(e){} }
     const m=this.members[key]; if(!m){ await this.auth.signOut(); return null; }
     this.loginKey=key;
     return {email:key,...m};
   }
   async login(name, phone){
+    await this.ensureAuth();
     const key=await staffEmail(name);
-    let real=''; try{ const d=await this.db.collection('logins').doc(key).get(); if(d.exists) real=d.data().email||''; }catch(e){}
+    let real=''; try{ const d=await this.r.get('logins/'+key,null); if(d) real=d.email||''; }catch(e){}
     const raw=String(phone||'').trim(), norm=normPhone(raw);
     const hard=e=>/network|too-many|operation-not-allowed|unauthorized-domain/.test(e.code||'');
     const tryPw=async em=>{ try{ await this.auth.signInWithEmailAndPassword(em, raw); }
@@ -394,7 +459,7 @@ class FireStore{
     const u=await this.currentUser(); if(!u) throw new Error('บัญชีนี้ไม่ได้รับสิทธิ์เข้าใช้ระบบ');
     return u;
   }
-  async logout(){ await this.auth.signOut(); }
+  async logout(){ if(this.auth) await this.auth.signOut(); }
   async reauth(pw){
     const u=this.auth.currentUser; const raw=String(pw||'').trim();
     const tryCred=async p=>u.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(u.email,p));
@@ -403,22 +468,23 @@ class FireStore{
   }
   async recoveryInfo(){
     const key=this.loginKey||this.auth.currentUser.email; let email='';
-    try{ const d=await this.db.collection('logins').doc(key).get(); if(d.exists) email=d.data().email||''; }catch(e){}
+    try{ const d=await this.r.get('logins/'+key); if(d) email=d.email||''; }catch(e){}
     return {email, verified: !!email && this.auth.currentUser.email===email};
   }
   /* ผูกอีเมลจริง: Firebase ส่งลิงก์ยืนยัน เมื่อกดแล้วบัญชีจะใช้อีเมลนี้ (ยังล็อกอินด้วยชื่อเหมือนเดิม) */
   async setRecoveryEmail(pw, email){
     await this.reauth(pw);
     const u=this.auth.currentUser, key=this.loginKey||u.email;
-    await this.db.collection('aliases').doc(email).set({key});
-    await this.db.collection('logins').doc(key).set({email});
+    await this.r.set('aliases/'+email,{key});
+    await this.r.set('logins/'+key,{email});
     this.auth.languageCode='th';
     try{ await u.verifyBeforeUpdateEmail(email); }
     catch(e){ throw new Error(e.code==='auth/email-already-in-use'?'อีเมลนี้ถูกใช้กับบัญชีอื่นแล้ว':e.code==='auth/invalid-email'?'รูปแบบอีเมลไม่ถูกต้อง':'ส่งอีเมลยืนยันไม่สำเร็จ: '+(e.code||e.message)); }
   }
   async forgotPassword(name){
+    await this.ensureAuth();
     const key=await staffEmail(name); let email='';
-    try{ const d=await this.db.collection('logins').doc(key).get(); if(d.exists) email=d.data().email||''; }catch(e){}
+    try{ const d=await this.r.get('logins/'+key,null); if(d) email=d.email||''; }catch(e){}
     if(!email) throw new Error('ชื่อนี้ยังไม่ได้ผูกอีเมลสำหรับกู้รหัสผ่าน (หรือพิมพ์ชื่อไม่ถูก) กรุณาติดต่อแอดมิน');
     this.auth.languageCode='th';
     try{ await this.auth.sendPasswordResetEmail(email); }
@@ -433,21 +499,24 @@ class FireStore{
     try{ await u.updatePassword(newPw); }
     catch(e){ throw new Error(e.code==='auth/weak-password'?'รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร':'เปลี่ยนรหัสผ่านไม่สำเร็จ: '+(e.code||e.message)); }
   }
-  async listStaff(){ const d=await this.staffRef().get(); const m=d.exists?d.data().members||{}:{}; return Object.entries(m).map(([email,v])=>({email,...v})); }
+  async listStaff(){ const m=await this.loadMembers(); return Object.entries(m).map(([email,v])=>({email,...v})); }
   async makeAccount(sa, email, phone){
     try{ await sa.createUserWithEmailAndPassword(email, phone); return 'สร้างแล้ว'; }
     catch(e){ if(e.code==='auth/email-already-in-use') return 'มีบัญชีอยู่แล้ว (ใช้รหัสเดิม)'; throw e; }
     finally{ try{ await sa.signOut(); }catch(x){} }
   }
   member(r){ return {prefix:r.prefix||'',name:r.name,surname:r.surname||'',position:r.position||'',role:r.role}; }
+  async mergeMembers(add, tk){ const keys=Object.keys(add); if(!keys.length) return;
+    await this.r.patch('meta/staff',{members:add},keys.map(k=>['members',k]),tk); }
   /* ตั้งค่าครั้งแรก: สร้างบัญชีผู้ดูแลก่อน แล้วบันทึกรายชื่อ จากนั้นสร้างบัญชีที่เหลือ */
   async setupStaff(rows, onProgress=()=>{}){
-    const s=this.sec(), sa=s.auth(), sdb=s.firestore();
+    await this.ensureAuth();
+    const sa=this.sec().auth();
     const members={}; for(const r of rows) members[await staffEmail(r.name)]=this.member(r);
     const admin=rows.find(r=>r.role==='admin'); const ae=await staffEmail(admin.name);
     try{ await sa.createUserWithEmailAndPassword(ae, admin.phone); }
     catch(e){ if(e.code==='auth/email-already-in-use') await sa.signInWithEmailAndPassword(ae, admin.phone); else throw e; }
-    try{ await this.staffRef(sdb).set({members},{merge:true}); }
+    try{ await this.mergeMembers(members, await sa.currentUser.getIdToken()); }
     catch(e){ await sa.signOut(); throw new Error('ระบบตั้งค่าไว้แล้ว ให้ผู้ดูแลระบบเพิ่มบุคลากรจากเมนู "บุคลากร" แทน'); }
     await sa.signOut();
     const rep=[{name:admin.name,status:'สร้างแล้ว (ผู้ดูแลระบบ)'}];
@@ -459,57 +528,58 @@ class FireStore{
   /* แอดมินเพิ่มบุคลากร: บันทึกสิทธิ์ก่อน แล้วสร้างบัญชีด้วย app สำรอง (ไม่ทำให้แอดมินหลุดจากระบบ) */
   async addStaff(rows, onProgress=()=>{}){
     const add={}; for(const r of rows) add[await staffEmail(r.name)]=this.member(r);
-    await this.staffRef().set({members:add},{merge:true});
+    await this.mergeMembers(add);
     const sa=this.sec().auth(); const rep=[];
     for(const r of rows){ onProgress(r.name);
       try{ rep.push({name:r.name,status:await this.makeAccount(sa, await staffEmail(r.name), r.phone)}); }
       catch(e){ rep.push({name:r.name,status:'ผิดพลาด: '+(e.code||e.message)}); } }
     return rep;
   }
-  async updateStaff(email, data){ const cur=(await this.listStaff()).find(m=>m.email===email)||{}; delete cur.email; await this.staffRef().set({members:{[email]:{...cur,...data}}},{merge:true}); }
-  async removeStaff(email){ await this.staffRef().update(new firebase.firestore.FieldPath('members',email), firebase.firestore.FieldValue.delete()); }
-  async listProjects(){ const s=await this.P().get(); return s.docs.map(d=>({id:d.id,...d.data()})).sort(byNewest); }
-  async getProject(id){ const d=await this.P().doc(id).get(); return d.exists ? {id:d.id,...d.data()} : null; }
+  async updateStaff(email, data){ const m=await this.loadMembers(); await this.mergeMembers({[email]:{...(m[email]||{}),...data}}); }
+  async removeStaff(email){ await this.r.patch('meta/staff',{},[['members',email]]); }
+  async listProjects(){ return (await this.r.list('projects')).sort(byNewest); }
+  async getProject(id){ return this.r.get('projects/'+id); }
   async saveProject(p){
     const {id, ...data}=p; data.updatedAt=Date.now(); if(!data.createdAt) data.createdAt=data.updatedAt;
-    const ref = id ? this.P().doc(id) : this.P().doc();
-    await ref.set(data);
-    await this.db.collection('surveys').doc(ref.id).set(publicDoc(data, S.settings));
-    return ref.id;
+    const pid=id||newId();
+    await this.r.set('projects/'+pid, data);
+    await this.r.set('surveys/'+pid, publicDoc(data, S.settings));
+    return pid;
   }
   async deleteProject(id){
     for(const sub of ['responses','tests','photos']){
-      const s=await this.P().doc(id).collection(sub).get();
-      await Promise.all(s.docs.map(d=>d.ref.delete()));
+      const docs=await this.r.list(`projects/${id}/${sub}`);
+      await Promise.all(docs.map(d=>this.r.del(`projects/${id}/${sub}/${d.id}`)));
     }
-    await this.P().doc(id).delete();
-    await this.db.collection('surveys').doc(id).delete();
+    await this.r.del('projects/'+id);
+    await this.r.del('surveys/'+id);
   }
-  async getPublic(id){ const d=await withTimeout(this.db.collection('surveys').doc(id).get(),20000,'โหลดข้อมูลช้าเกินไป'); return d.exists ? d.data() : null; }
-  watchProject(pid, cb){
-    const subs=['responses','tests'].map(c=>{ let first=true;
-      return this.P().doc(pid).collection(c).onSnapshot(()=>{ if(first){ first=false; return; } cb(); }, ()=>{}); });
-    return ()=>subs.forEach(u=>u());
-  }
-  watchPublic(id, cb){ return this.db.collection('surveys').doc(id).onSnapshot(d=>cb(d.exists?d.data():null), ()=>{}); }
-  watchPublicList(cb){ return this.db.collection('surveys').where('active','==',true).onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()})).sort(byNewest)), ()=>{}); }
-  async listPublic(){ const s=await withTimeout(this.db.collection('surveys').where('active','==',true).get(),20000,'โหลดข้อมูลช้าเกินไป'); return s.docs.map(d=>({id:d.id,...d.data()})).sort(byNewest); }
-  async addResponse(pid,r){ await this.P().doc(pid).collection('responses').add(r); }
-  async listResponses(pid){ const s=await this.P().doc(pid).collection('responses').orderBy('at').get(); return s.docs.map(d=>({id:d.id,...d.data()})); }
-  async deleteResponse(pid,rid){ await this.P().doc(pid).collection('responses').doc(rid).delete(); }
-  async addTest(pid,r){ await this.P().doc(pid).collection('tests').add(r); }
-  async listTests(pid){ const s=await this.P().doc(pid).collection('tests').orderBy('at').get(); return s.docs.map(d=>({id:d.id,...d.data()})); }
-  async deleteTest(pid,rid){ await this.P().doc(pid).collection('tests').doc(rid).delete(); }
-  async listPhotos(pid){ const s=await this.P().doc(pid).collection('photos').get(); return s.docs.map(d=>({id:d.id,...d.data()})).sort(photoOrder); }
-  async addPhoto(pid,ph){ await this.P().doc(pid).collection('photos').add({...ph,at:Date.now()}); }
-  async updatePhoto(pid,id,data){ await this.P().doc(pid).collection('photos').doc(id).update(data); }
-  async deletePhoto(pid,id){ await this.P().doc(pid).collection('photos').doc(id).delete(); }
-  async getSettings(){ try{ const d=await this.db.collection('settings').doc('main').get(); return {...DEFAULT_SETTINGS, ...(d.exists?d.data():{})}; }catch(e){ return {...DEFAULT_SETTINGS}; } }
-  async saveSettings(s){ await this.db.collection('settings').doc('main').set(s); }
-  async getYears(){ try{ const d=await this.db.collection('meta').doc('years').get(); return d.exists ? d.data().list||[] : []; }catch(e){ return []; } }
-  async saveYears(list){ await this.db.collection('meta').doc('years').set({list}); }
-  async getClasses(){ try{ const d=await this.db.collection('meta').doc('classes').get(); return d.exists ? d.data().list||[] : DEFAULT_CLASSES; }catch(e){ return DEFAULT_CLASSES; } }
-  async saveClasses(list){ await this.db.collection('meta').doc('classes').set({list}); }
+  async getPublic(id){ return this.r.get('surveys/'+id, null); }
+  async listPublic(){ return (await this.r.query('surveys',['active','EQUAL',true],null)).sort(byNewest); }
+  /* อัปเดตอัตโนมัติ: ตรวจจำนวนคำตอบทุก 6 วินาที (ใช้โควตาน้อยมาก) */
+  watchProject(pid, cb){ let sig=null;
+    return poll(async()=>{ const [a,b]=await Promise.all([this.r.count('projects/'+pid,'responses'),this.r.count('projects/'+pid,'tests')]);
+      const s=a+'|'+b; if(sig!==null && s!==sig) cb(); sig=s; }, 6000); }
+  watchPublic(id, cb){ let last=null;
+    return poll(async()=>{ const d=await this.getPublic(id); const j=JSON.stringify(d&&{...d,updatedAt:0}); if(last!==null && j!==last) cb(d); last=j; }, 8000); }
+  watchPublicList(cb){ let last=null;
+    return poll(async()=>{ const l=await this.listPublic(); const j=JSON.stringify(l.map(x=>[x.id,x.active,x.test?.preOpen,x.test?.postOpen,x.sat?.open,x.closeAt])); if(last!==null && j!==last) cb(l); last=j; }, 15000); }
+  async addResponse(pid,r){ await this.r.add(`projects/${pid}/responses`, r, null); }
+  async listResponses(pid){ return (await this.r.list(`projects/${pid}/responses`)).sort((a,b)=>a.at-b.at); }
+  async deleteResponse(pid,rid){ await this.r.del(`projects/${pid}/responses/${rid}`); }
+  async addTest(pid,r){ await this.r.add(`projects/${pid}/tests`, r, null); }
+  async listTests(pid){ return (await this.r.list(`projects/${pid}/tests`)).sort((a,b)=>a.at-b.at); }
+  async deleteTest(pid,rid){ await this.r.del(`projects/${pid}/tests/${rid}`); }
+  async listPhotos(pid){ return (await this.r.list(`projects/${pid}/photos`)).sort(photoOrder); }
+  async addPhoto(pid,ph){ await this.r.add(`projects/${pid}/photos`, {...ph,at:Date.now()}); }
+  async updatePhoto(pid,id,data){ await this.r.patch(`projects/${pid}/photos/${id}`, data, Object.keys(data).map(k=>[k])); }
+  async deletePhoto(pid,id){ await this.r.del(`projects/${pid}/photos/${id}`); }
+  async getSettings(){ try{ const d=await this.r.get('settings/main'); return {...DEFAULT_SETTINGS, ...(d||{}), id:undefined}; }catch(e){ return {...DEFAULT_SETTINGS}; } }
+  async saveSettings(s){ await this.r.set('settings/main', s); }
+  async getYears(){ try{ const d=await this.r.get('meta/years'); return d?.list||[]; }catch(e){ return []; } }
+  async saveYears(list){ await this.r.set('meta/years',{list}); }
+  async getClasses(){ try{ const d=await this.r.get('meta/classes', this.auth?.currentUser?undefined:null); return d ? d.list||[] : DEFAULT_CLASSES; }catch(e){ return DEFAULT_CLASSES; } }
+  async saveClasses(list){ await this.r.set('meta/classes',{list}); }
 }
 
 /* ------------------------------------------------------------------ */
