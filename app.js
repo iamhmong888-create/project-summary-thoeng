@@ -27,6 +27,14 @@ const DEFAULT_CLASSES = [
   ['ศศช.บ้านไทยสามัคคี','อนุพงษ์ สมจริงจงรักษ์'],['ศศช.บ้านราฎภักดี','วนศาสตร์ วัฒนาสกุลลี'],['ศรช.ระดับตำบลหงาว','ธวัชชัย เพ็ชรแสง'],
   ['ศรช.ระดับตำบลเวียง','ชินดนัย คำต๊ะ']].map(([center,teacher])=>({center,teacher}));
 const roomLabel = c => c.teacher ? `${c.center} (ครู${c.teacher})` : c.center;
+/* เทียบชื่อห้องแบบไม่สนช่องว่าง/อักขระที่มองไม่เห็น/รูปแบบสระอำ เพื่อไม่ให้ห้องเดียวกันแยกเป็น 2 แถว */
+const roomKey = s => String(s||'').normalize('NFC').replace(/\u0E4D\u0E32/g,'\u0E33').toLowerCase().replace(/[^\u0E00-\u0E7Fa-z0-9]/g,'');
+function canonRooms(rows, classes){
+  const m=new Map((classes||[]).map(c=>[roomKey(roomLabel(c)),roomLabel(c)]));
+  const seen=new Map();
+  rows.forEach(r=>{ if(!r.room) return; const k=roomKey(r.room); const l=m.get(k)||seen.get(k)||r.room; seen.set(k,l); r.room=l; });
+  return rows;
+}
 const OCCS = ['เกษตรกร','รับจ้าง','ค้าขาย/ธุรกิจส่วนตัว','ข้าราชการ/พนักงานรัฐ','นักเรียน/นักศึกษา','แม่บ้าน/ไม่ได้ประกอบอาชีพ','อื่น ๆ'];
 const LEVELS = [[4.51,'มากที่สุด'],[3.51,'มาก'],[2.51,'ปานกลาง'],[1.51,'น้อย'],[0,'น้อยที่สุด']];
 const SCALE_LABELS = {5:'มากที่สุด',4:'มาก',3:'ปานกลาง',2:'น้อย',1:'น้อยที่สุด'};
@@ -723,8 +731,9 @@ function testStats(p, rows, classes){
   const learners=keys.map(k=>{ const a=preM.get(k), b=postM.get(k), x=b||a; return {key:k, postTries:tries['post|'+k]||0, name:x.name, sid:x.sid||'', room:x.room||'', level:x.level||'', pre:a?a.score:null, post:b?b.score:null}; })
     .sort((a,b)=>(a.room||'').localeCompare(b.room||'','th')||String(a.sid).localeCompare(String(b.sid)));
   // แสดงทุกห้องในรายการห้องเรียน (รวมห้องที่ยังไม่มีผู้ทำ = 0) แล้วต่อด้วยห้องอื่นที่พบในข้อมูล
-  const roomNames=[...new Set([...(classes||[]).map(roomLabel), ...learners.map(l=>l.room||'ไม่ระบุ')])];
-  const rooms=roomNames.map(r=>{ const L=learners.filter(l=>(l.room||'ไม่ระบุ')===r); const a=msd(L.filter(l=>l.pre!=null).map(l=>l.pre)), b=msd(L.filter(l=>l.post!=null).map(l=>l.post));
+  const roomNames=[]; const rk=new Set();
+  [...(classes||[]).map(roomLabel), ...learners.map(l=>l.room||'ไม่ระบุ')].forEach(r=>{ const k=roomKey(r); if(!rk.has(k)){ rk.add(k); roomNames.push(r); } });
+  const rooms=roomNames.map(r=>{ const L=learners.filter(l=>roomKey(l.room||'ไม่ระบุ')===roomKey(r)); const a=msd(L.filter(l=>l.pre!=null).map(l=>l.pre)), b=msd(L.filter(l=>l.post!=null).map(l=>l.post));
     return {room:r, preN:a.n, preM:a.mean, postN:b.n, postM:b.mean}; });
   const pairs=learners.filter(l=>l.pre!=null&&l.post!=null);
   const improved=pairs.filter(l=>l.post>l.pre).length;
@@ -1585,6 +1594,7 @@ async function renderProject(id, keep=false){
   const p=await S.store.getProject(id); if(!p) throw new Error('ไม่พบโครงการนี้');
   const [resps, photos, trows]=await Promise.all([S.store.listResponses(id), S.store.listPhotos(id), S.store.listTests(id)]);
   const classes=await S.store.getClasses().catch(()=>DEFAULT_CLASSES);
+  canonRooms(resps,classes); canonRooms(trows,classes);
   const st=computeStats(p,resps), ts=testStats(p,trows,classes); const t=num(p.targetQty);
   const joinUrl=learnerUrl(id,'j');
   const summary=autoSummary(p,st,ts);
@@ -2079,7 +2089,8 @@ async function reportToDocx(B, filename){
 async function renderReport(id){
   app.innerHTML='<div class="empty">กำลังสร้างรายงาน…</div>';
   const p=await S.store.getProject(id); if(!p) throw new Error('ไม่พบโครงการนี้');
-  const [resps,photos,trows]=await Promise.all([S.store.listResponses(id),S.store.listPhotos(id),S.store.listTests(id)]);
+  const [resps,photos,trows,classes]=await Promise.all([S.store.listResponses(id),S.store.listPhotos(id),S.store.listTests(id),S.store.getClasses().catch(()=>DEFAULT_CLASSES)]);
+  canonRooms(resps,classes); canonRooms(trows,classes);
   const st=computeStats(p,resps), ts=testStats(p,trows);
   const B=buildReport(p,st,ts,photos,resps,S.settings);
   const fname=('รายงานผล_'+(p.name||'โครงการ')).replace(/[\\/:*?"<>|]/g,'').slice(0,80);

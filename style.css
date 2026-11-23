@@ -221,3 +221,9 @@ table.t tr.expired td{background:#f1f2f1;color:#8a8f8c}
 .resmsg{font-size:19px;font-weight:700;border-radius:12px;padding:12px 14px;margin:10px 0 12px}
 .resmsg.pass{background:#e7f6ec;color:#1f6f5c;border:2px solid #f2c230}
 .resmsg.fail{background:#fff3e6;color:#b4541f;border:2px solid #f0c08a}
+/* แถวสลับสี เขียวอ่อน/ขาว อ่านง่าย */
+table.t tbody tr:nth-child(even) td{background:#eaf5ef}
+table.t tbody tr.sec td{background:#dcece4}
+table.t tbody tr.tot td{background:#fff}
+table.t tbody tr.expired td{background:#f1f2f1;color:#8a8f8c}
+table.t tbody tr.link:hover td{background:#d6ece1}
