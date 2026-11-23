@@ -705,8 +705,10 @@ function computeStats(p, resps){
     gender:dist('gender',GENDERS), age:dist('age',AGES), level:dist('level',EDU_LEVELS), room:dist('room',[]),
     comments:resps.map(r=>(r.comment||'').trim()).filter(Boolean) };
 }
-const learnerKey=r=>r.sid?'id:'+String(r.sid).replace(/\s/g,''):'n:'+nameKey(r.name);
-function testStats(p, rows){
+/* จับคู่ก่อน-หลังเรียนด้วยรหัสนักศึกษา (ถ้าเป็นตัวเลขอย่างน้อย 5 หลัก) ไม่เช่นนั้นใช้ชื่อ
+   ป้องกันกรณีหลายคนกรอกรหัสเดียวกัน เช่น "0" หรือ "-" แล้วถูกนับรวมเป็นคนเดียว */
+const learnerKey=r=>{ const sid=String(r.sid||'').replace(/[\s-]/g,''); return /^\d{5,}$/.test(sid)?'id:'+sid:'n:'+nameKey(r.name); };
+function testStats(p, rows, classes){
   const Q=p.test?.questions||[], N=Q.length, cut=num(p.test?.passPct)||60;
   const sc=r=>Q.reduce((s,q,i)=>s+((r.answers||[])[i]===q.ans?1:0),0);
   const lk=learnerKey;
@@ -720,7 +722,8 @@ function testStats(p, rows){
   const keys=[...new Set([...preM.keys(),...postM.keys()])];
   const learners=keys.map(k=>{ const a=preM.get(k), b=postM.get(k), x=b||a; return {key:k, postTries:tries['post|'+k]||0, name:x.name, sid:x.sid||'', room:x.room||'', level:x.level||'', pre:a?a.score:null, post:b?b.score:null}; })
     .sort((a,b)=>(a.room||'').localeCompare(b.room||'','th')||String(a.sid).localeCompare(String(b.sid)));
-  const roomNames=[...new Set(learners.map(l=>l.room||'ไม่ระบุ'))];
+  // แสดงทุกห้องในรายการห้องเรียน (รวมห้องที่ยังไม่มีผู้ทำ = 0) แล้วต่อด้วยห้องอื่นที่พบในข้อมูล
+  const roomNames=[...new Set([...(classes||[]).map(roomLabel), ...learners.map(l=>l.room||'ไม่ระบุ')])];
   const rooms=roomNames.map(r=>{ const L=learners.filter(l=>(l.room||'ไม่ระบุ')===r); const a=msd(L.filter(l=>l.pre!=null).map(l=>l.pre)), b=msd(L.filter(l=>l.post!=null).map(l=>l.post));
     return {room:r, preN:a.n, preM:a.mean, postN:b.n, postM:b.mean}; });
   const pairs=learners.filter(l=>l.pre!=null&&l.post!=null);
@@ -1253,8 +1256,8 @@ async function renderRooms(){
 /* ค้นหาผู้เรียน (ชื่อ / รหัสนักศึกษา) ในทุกโครงการ                      */
 /* ------------------------------------------------------------------ */
 async function renderFind(){
-  app.innerHTML=`<h1>🔍 ค้นหาผู้เรียน</h1><p class="muted">ค้นจากชื่อ นามสกุล หรือรหัสนักศึกษา ในแบบทดสอบก่อน/หลังเรียน และแบบประเมินความพึงพอใจของทุกโครงการ</p>
-    <div class="card"><div class="row"><input type="search" id="fq" placeholder="พิมพ์ชื่อ หรือรหัสนักศึกษา อย่างน้อย 2 ตัวอักษร" style="flex:1;min-width:220px;font-size:17px">
+  app.innerHTML=`<h1>🔍 ค้นหาผู้เรียน</h1><p class="muted">ค้นจากชื่อ นามสกุล รหัสนักศึกษา หรือชื่อศูนย์/ห้องเรียน ในแบบทดสอบก่อน/หลังเรียน และแบบประเมินความพึงพอใจของทุกโครงการ</p>
+    <div class="card"><div class="row"><input type="search" id="fq" placeholder="พิมพ์ชื่อ รหัสนักศึกษา หรือชื่อศูนย์/ห้องเรียน (อย่างน้อย 2 ตัวอักษร)" style="flex:1;min-width:220px;font-size:17px">
       <select id="ffy" style="width:auto"></select><select id="fk" style="width:auto"><option value="">ทุกประเภท</option><option value="pre">ก่อนเรียน</option><option value="post">หลังเรียน</option><option value="sat">ประเมินความพึงพอใจ</option></select></div>
       <div class="muted small" id="fmsg" style="margin-top:8px">กำลังรวบรวมข้อมูล…</div></div>
     <div class="card" style="overflow-x:auto"><div id="fres"></div></div>`;
@@ -1276,7 +1279,7 @@ async function renderFind(){
   const draw=()=>{
     const q=$('#fq').value.trim().toLowerCase().replace(/\s+/g,''), fy=$('#ffy').value, k=$('#fk').value;
     if(q.length<2){ $('#fres').innerHTML='<div class="empty">พิมพ์ชื่อหรือรหัสนักศึกษาเพื่อค้นหา</div>'; return; }
-    const hit=rows.filter(r=>(!fy||String(r.p.fiscalYear)===fy)&&(!k||r.kind===k)&&(nameKey(r.name).includes(nameKey(q))||r.name.toLowerCase().replace(/\s+/g,'').includes(q)||String(r.sid).includes(q)));
+    const hit=rows.filter(r=>(!fy||String(r.p.fiscalYear)===fy)&&(!k||r.kind===k)&&(nameKey(r.name).includes(nameKey(q))||r.name.toLowerCase().replace(/\s+/g,'').includes(q)||String(r.sid).includes(q)||String(r.room).toLowerCase().replace(/\s+/g,'').includes(q)));
     $('#fres').innerHTML=hit.length?`<div class="muted small" style="margin-bottom:6px">พบ ${hit.length} รายการ</div>
       <table class="t"><thead><tr><th>ชื่อ-สกุล</th><th>รหัส</th><th>ประเภท</th><th>ผล</th><th>โครงการ</th><th>ห้องเรียน</th><th>วันที่ส่ง</th></tr></thead><tbody>
       ${hit.slice(0,300).map(r=>`<tr class="link" data-id="${esc(r.p.id)}"><td><b>${esc(r.name)}</b></td><td class="small">${esc(r.sid)}</td>
@@ -1581,7 +1584,8 @@ async function renderProject(id, keep=false){
   if(!keep) app.innerHTML='<div class="empty">กำลังโหลด…</div>';
   const p=await S.store.getProject(id); if(!p) throw new Error('ไม่พบโครงการนี้');
   const [resps, photos, trows]=await Promise.all([S.store.listResponses(id), S.store.listPhotos(id), S.store.listTests(id)]);
-  const st=computeStats(p,resps), ts=testStats(p,trows); const t=num(p.targetQty);
+  const classes=await S.store.getClasses().catch(()=>DEFAULT_CLASSES);
+  const st=computeStats(p,resps), ts=testStats(p,trows,classes); const t=num(p.targetQty);
   const joinUrl=learnerUrl(id,'j');
   const summary=autoSummary(p,st,ts);
   const T=p.test||{}; const nQ=(T.questions||[]).length;
@@ -1640,9 +1644,9 @@ async function renderProject(id, keep=false){
         ${ts.learners.map((l,i)=>{ const d=l.pre!=null&&l.post!=null?l.post-l.pre:null; const pass=l.post!=null&&pct(l.post,ts.N)>=ts.cut;
           return `<tr><td class="c">${i+1}</td><td class="small">${esc(l.sid)}</td><td>${esc(l.name)}</td><td class="small">${esc(l.room)}</td><td class="num">${l.pre??'-'}</td><td class="num">${l.post??'-'}${l.postTries>1?`<div class="muted small">ดีที่สุดจาก ${l.postTries} ครั้ง</div>`:''}</td><td class="num">${d==null?'-':(d>0?'+':'')+d}</td><td>${l.post==null?'<span class="muted">ยังไม่ทำหลังเรียน</span>':pass?'<span class="pill">ผ่าน</span>':'<span class="pill off">ไม่ผ่าน</span>'}</td><td class="num"><button class="btn ghost danger sm dell" data-k="${esc(l.key)}" data-n="${esc(l.name)}">ลบ</button></td></tr>`; }).join('')}
         </tbody></table></details>
-      ${ts.rooms.length>1?`<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">สรุปรายห้องเรียน (${ts.rooms.length})</summary>
+      ${ts.rooms.length>1?`<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">สรุปรายห้องเรียน (มีผู้ทำ ${ts.rooms.filter(r=>r.preN||r.postN).length} จาก ${ts.rooms.length} ห้อง)</summary>
         <table class="t"><thead><tr><th>ห้องเรียน</th><th class="num">ก่อนเรียน (คน)</th><th class="num">x̄ ก่อน</th><th class="num">หลังเรียน (คน)</th><th class="num">x̄ หลัง</th></tr></thead><tbody>
-        ${ts.rooms.map(r=>`<tr><td>${esc(r.room)}</td><td class="num">${r.preN}</td><td class="num">${r.preN?f2(r.preM):'-'}</td><td class="num">${r.postN}</td><td class="num">${r.postN?f2(r.postM):'-'}</td></tr>`).join('')}</tbody></table></details>`:''}
+        ${ts.rooms.map(r=>`<tr class="${r.preN||r.postN?'':'expired'}"><td>${esc(r.room)}</td><td class="num">${r.preN}</td><td class="num">${r.preN?f2(r.preM):'-'}</td><td class="num">${r.postN}</td><td class="num">${r.postN?f2(r.postM):'-'}</td></tr>`).join('')}</tbody></table></details>`:''}
       <details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">ร้อยละที่ตอบถูกรายข้อ</summary>
         <table class="t"><thead><tr><th>ข้อ</th><th class="num">ก่อนเรียน</th><th class="num">หลังเรียน</th><th style="width:25%"></th></tr></thead><tbody>
         ${ts.items.map((it,i)=>`<tr><td>${i+1}. ${esc(it.q)}</td><td class="num">${f2(it.pre)}</td><td class="num">${f2(it.post)}</td><td><div class="bar" style="margin-bottom:3px"><i style="width:${it.pre}%;background:#9bb8ad"></i></div><div class="bar"><i style="width:${it.post}%"></i></div></td></tr>`).join('')}
