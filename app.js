@@ -388,7 +388,9 @@ class FsRest{
     const j=await res.json().catch(()=>({}));
     if(!res.ok){ const st=(Array.isArray(j)?j[0]:j)?.error?.status||'';
       const err=new Error(st==='PERMISSION_DENIED'?'ไม่มีสิทธิ์ทำรายการนี้ (permission-denied)':((Array.isArray(j)?j[0]:j)?.error?.message||('HTTP '+res.status)));
-      err.code=st==='PERMISSION_DENIED'?'permission-denied':(res.status>=500?'unavailable':st.toLowerCase()); throw err; }
+      err.code=st==='PERMISSION_DENIED'?'permission-denied':st==='RESOURCE_EXHAUSTED'||res.status===429?'quota':(res.status>=500?'unavailable':st.toLowerCase());
+      if(err.code==='quota') err.message='ระบบใช้งานเกินโควตาฟรีของ Firebase ในวันนี้';
+      throw err; }
     return j;
   }
   async get(path, tk){ const j=await this.req('GET', this.base+'/'+fsPath(path), null, tk); return j?fsDoc(j):null; }
@@ -396,13 +398,14 @@ class FsRest{
     do{ const j=await this.req('GET', `${this.base}/${fsPath(col)}?pageSize=300${page?'&pageToken='+encodeURIComponent(page):''}`, null, tk);
       (j?.documents||[]).forEach(d=>out.push(fsDoc(d))); page=j?.nextPageToken||''; }while(page);
     return out; }
-  async set(path, data, tk){ return this.req('PATCH', this.base+'/'+fsPath(path), {fields:fsFields(data)}, tk); }
+  wrote(path){ if(this.onWrite) this.onWrite(path); }
+  async set(path, data, tk){ const r=await this.req('PATCH', this.base+'/'+fsPath(path), {fields:fsFields(data)}, tk); this.wrote(path); return r; }
   /* อัปเดตเฉพาะบางฟิลด์ (fieldPaths = [['members','x@y'], ['caption']]); ฟิลด์ที่ไม่มีใน data จะถูกลบ */
   async patch(path, data, fieldPaths, tk){
     const q=fieldPaths.map(fp=>'updateMask.fieldPaths='+encodeURIComponent(fsFieldPath(fp))).join('&');
-    return this.req('PATCH', `${this.base}/${fsPath(path)}?${q}`, {fields:fsFields(data)}, tk); }
-  async add(col, data, tk){ const j=await this.req('POST', this.base+'/'+fsPath(col), {fields:fsFields(data)}, tk); return fsDoc(j); }
-  async del(path, tk){ return this.req('DELETE', this.base+'/'+fsPath(path), null, tk); }
+    const r=await this.req('PATCH', `${this.base}/${fsPath(path)}?${q}`, {fields:fsFields(data)}, tk); this.wrote(path); return r; }
+  async add(col, data, tk){ const j=await this.req('POST', this.base+'/'+fsPath(col), {fields:fsFields(data)}, tk); this.wrote(col+'/x'); return fsDoc(j); }
+  async del(path, tk){ const r=await this.req('DELETE', this.base+'/'+fsPath(path), null, tk); this.wrote(path); return r; }
   async query(col, where, tk){
     const sq={from:[{collectionId:col}]}; if(where) sq.where={fieldFilter:{field:{fieldPath:where[0]},op:where[1],value:fsEnc(where[2])}};
     const j=await this.req('POST', this.base+':runQuery', {structuredQuery:sq}, tk);
@@ -422,8 +425,13 @@ class FireStore{
   async init(){
     this.r=new FsRest(FIREBASE_CONFIG, async()=>{ try{ return this.auth?.currentUser ? await this.auth.currentUser.getIdToken() : null; }catch(e){ return null; } });
     this.members=null;
+    /* แคชในหน่วยความจำ: ลดจำนวนการอ่านฐานข้อมูล (Firebase ฟรีอ่านได้ 50,000 ครั้ง/วัน) */
+    this.cache=new Map();
+    this.r.onWrite=path=>{ const parent=path.split('/').slice(0,-1).join('/'); for(const k of [...this.cache.keys()]) if(k===path||k===parent||k.startsWith(path+'/')||(parent&&k.startsWith(parent))) this.cache.delete(k); };
     if(PAGE_MODE==='admin') await this.ensureAuth();
   }
+  async cached(key, ttl, fn){ const c=this.cache.get(key); if(c && Date.now()-c.t<ttl) return c.v; const v=await fn(); this.cache.set(key,{t:Date.now(),v}); return v; }
+  invalidate(prefix){ for(const k of [...this.cache.keys()]) if(k.startsWith(prefix)) this.cache.delete(k); }
   /* โหลดเฉพาะ Firebase Authentication (เล็กกว่าการโหลด Firestore SDK มาก) */
   async ensureAuth(){
     if(this.auth) return;
@@ -435,7 +443,7 @@ class FireStore{
   sec(){ return firebase.apps.find(a=>a.name==='sec') || firebase.initializeApp(FIREBASE_CONFIG,'sec'); }
   waitAuth(){ return new Promise(res=>{ const un=this.auth.onAuthStateChanged(u=>{ un(); res(u); }); }); }
   hasStaff(){ return true; }
-  async loadMembers(tk){ const d=await this.r.get('meta/staff',tk); return d?.members||{}; }
+  async loadMembers(tk){ const d=tk?await this.r.get('meta/staff',tk):await this.cached('meta/staff',60000,()=>this.r.get('meta/staff')); return d?.members||{}; }
   async currentUser(){
     await this.ensureAuth();
     const u=this.auth.currentUser || await this.waitAuth(); if(!u) return null;
@@ -545,8 +553,8 @@ class FireStore{
   }
   async updateStaff(email, data){ const m=await this.loadMembers(); await this.mergeMembers({[email]:{...(m[email]||{}),...data}}); }
   async removeStaff(email){ await this.r.patch('meta/staff',{},[['members',email]]); }
-  async listProjects(){ return (await this.r.list('projects')).sort(byNewest); }
-  async getProject(id){ return this.r.get('projects/'+id); }
+  async listProjects(){ return (await this.cached('projects',60000,()=>this.r.list('projects'))).map(x=>({...x})).sort(byNewest); }
+  async getProject(id){ const p=await this.cached('projects/'+id+'/doc',30000,()=>this.r.get('projects/'+id)); return p?JSON.parse(JSON.stringify(p)):null; }
   async saveProject(p){
     const {id, ...data}=p; data.updatedAt=Date.now(); if(!data.createdAt) data.createdAt=data.updatedAt;
     const pid=id||newId();
@@ -567,26 +575,27 @@ class FireStore{
   /* อัปเดตอัตโนมัติ: ตรวจจำนวนคำตอบทุก 6 วินาที (ใช้โควตาน้อยมาก) */
   watchProject(pid, cb){ let sig=null;
     return poll(async()=>{ const [a,b]=await Promise.all([this.r.count('projects/'+pid,'responses'),this.r.count('projects/'+pid,'tests')]);
-      const s=a+'|'+b; if(sig!==null && s!==sig) cb(); sig=s; }, 6000); }
-  watchPublic(id, cb){ let last=null;
-    return poll(async()=>{ const d=await this.getPublic(id); const j=JSON.stringify(d&&{...d,updatedAt:0}); if(last!==null && j!==last) cb(d); last=j; }, 8000); }
-  watchPublicList(cb){ let last=null;
-    return poll(async()=>{ const l=await this.listPublic(); const j=JSON.stringify(l.map(x=>[x.id,x.active,x.test?.preOpen,x.test?.postOpen,x.sat?.open,x.closeAt])); if(last!==null && j!==last) cb(l); last=j; }, 15000); }
+      const s=a+'|'+b; if(sig!==null && s!==sig) cb(); sig=s; }, 15000); }
+  /* หน้าผู้เรียน: ตรวจทุก 30 วินาที ไม่เกิน 20 นาที (ประหยัดโควตา เพราะผู้เรียนหลายร้อยคนเปิดพร้อมกัน) */
+  watchPublic(id, cb){ let last=null; const until=Date.now()+20*60000;
+    return poll(async()=>{ if(Date.now()>until) return; const d=await this.getPublic(id); const j=JSON.stringify(d&&{...d,updatedAt:0}); if(last!==null && j!==last) cb(d); last=j; }, 30000); }
+  watchPublicList(cb){ let last=null; const until=Date.now()+10*60000;
+    return poll(async()=>{ if(Date.now()>until) return; const l=await this.listPublic(); const j=JSON.stringify(l.map(x=>[x.id,x.active,x.test?.preOpen,x.test?.postOpen,x.sat?.open,x.closeAt])); if(last!==null && j!==last) cb(l); last=j; }, 60000); }
   async addResponse(pid,r){ await this.r.add(`projects/${pid}/responses`, r, null); }
-  async listResponses(pid){ return (await this.r.list(`projects/${pid}/responses`)).sort((a,b)=>a.at-b.at); }
+  async listResponses(pid){ return (await this.cached(`projects/${pid}/responses`,90000,()=>this.r.list(`projects/${pid}/responses`))).map(x=>({...x})).sort((a,b)=>a.at-b.at); }
   async deleteResponse(pid,rid){ await this.r.del(`projects/${pid}/responses/${rid}`); }
   async addTest(pid,r){ await this.r.add(`projects/${pid}/tests`, r, null); }
-  async listTests(pid){ return (await this.r.list(`projects/${pid}/tests`)).sort((a,b)=>a.at-b.at); }
+  async listTests(pid){ return (await this.cached(`projects/${pid}/tests`,90000,()=>this.r.list(`projects/${pid}/tests`))).map(x=>({...x})).sort((a,b)=>a.at-b.at); }
   async deleteTest(pid,rid){ await this.r.del(`projects/${pid}/tests/${rid}`); }
-  async listPhotos(pid){ return (await this.r.list(`projects/${pid}/photos`)).sort(photoOrder); }
+  async listPhotos(pid){ return (await this.cached(`projects/${pid}/photos`,1800000,()=>this.r.list(`projects/${pid}/photos`))).map(x=>({...x})).sort(photoOrder); }
   async addPhoto(pid,ph){ await this.r.add(`projects/${pid}/photos`, {...ph,at:Date.now()}); }
   async updatePhoto(pid,id,data){ await this.r.patch(`projects/${pid}/photos/${id}`, data, Object.keys(data).map(k=>[k])); }
   async deletePhoto(pid,id){ await this.r.del(`projects/${pid}/photos/${id}`); }
-  async getSettings(){ try{ const d=await this.r.get('settings/main'); return {...DEFAULT_SETTINGS, ...(d||{}), id:undefined}; }catch(e){ return {...DEFAULT_SETTINGS}; } }
+  async getSettings(){ try{ const d=await this.cached('settings/main',600000,()=>this.r.get('settings/main')); return {...DEFAULT_SETTINGS, ...(d||{}), id:undefined}; }catch(e){ return {...DEFAULT_SETTINGS}; } }
   async saveSettings(s){ await this.r.set('settings/main', s); }
-  async getYears(){ try{ const d=await this.r.get('meta/years'); return d?.list||[]; }catch(e){ return []; } }
+  async getYears(){ try{ const d=await this.cached('meta/years',600000,()=>this.r.get('meta/years')); return d?.list||[]; }catch(e){ return []; } }
   async saveYears(list){ await this.r.set('meta/years',{list}); }
-  async getClasses(){ try{ const d=await this.r.get('meta/classes', this.auth?.currentUser?undefined:null); return d ? d.list||[] : DEFAULT_CLASSES; }catch(e){ return DEFAULT_CLASSES; } }
+  async getClasses(){ try{ const d=await this.cached('meta/classes',600000,()=>this.r.get('meta/classes', this.auth?.currentUser?undefined:null)); return d ? d.list||[] : DEFAULT_CLASSES; }catch(e){ return DEFAULT_CLASSES; } }
   async saveClasses(list){ await this.r.set('meta/classes',{list}); }
 }
 
@@ -783,6 +792,12 @@ function showRetry(msg){
     <p>${esc(msg)}</p><p class="muted small">ตรวจสอบสัญญาณอินเทอร์เน็ต แล้วกดลองใหม่ ถ้าเปิดจากแอป LINE ให้กด ⋯ แล้วเลือก "เปิดในเบราว์เซอร์"</p>
     <button class="btn" onclick="location.reload()" style="font-size:17px;padding:10px 26px">🔄 ลองใหม่</button></div>`;
 }
+function showQuota(){
+  app.innerHTML=`<div class="card sv" style="text-align:center;padding:30px 18px"><div style="font-size:40px">⏳</div><h2>ระบบใช้งานเกินโควตาของวันนี้</h2>
+    <p>Firebase แบบฟรีจำกัดจำนวนการอ่านข้อมูลต่อวัน ตอนนี้ใช้ครบแล้ว<br><b>ระบบจะกลับมาใช้ได้เองประมาณ 15:00 น.</b> (รีเซ็ตทุกวัน)</p>
+    <p class="muted small">ข้อมูลที่บันทึกไว้แล้วไม่หาย · ผู้ดูแลระบบสามารถเปลี่ยนเป็นแผน Blaze เพื่อไม่ให้ติดโควตาได้</p>
+    <button class="btn" onclick="location.reload()">🔄 ลองใหม่</button></div>`;
+}
 async function boot(){
   try{
     S.store = S.firebase ? new FireStore() : new LocalStore();
@@ -791,7 +806,7 @@ async function boot(){
       S.user=await withTimeout(S.store.currentUser(), 20000, 'ตรวจสอบการเข้าสู่ระบบไม่สำเร็จ');
       if(!S.firebase || S.user) S.settings=await withTimeout(S.store.getSettings(), 15000, 'โหลดข้อมูลหน่วยงานไม่สำเร็จ');
     }
-  }catch(e){ drawHeader(); showRetry(e.message); return; }
+  }catch(e){ drawHeader(); if(e.code==='quota') showQuota(); else showRetry(e.message); return; }
   S.ready=true; drawHeader(); route();
 }
 window.addEventListener('hashchange',()=>S.ready&&route());
@@ -854,6 +869,7 @@ async function route(){
     return await renderHome();
   }catch(e){
     console.error(e);
+    if(e.code==='quota') return showQuota();
     if(/unavailable|network|timeout|ช้าเกินไป|offline/i.test((e.code||'')+' '+e.message)) return showRetry('เชื่อมต่อฐานข้อมูลไม่ได้');
     app.innerHTML=`<div class="card"><h2>เกิดข้อผิดพลาด</h2><p>${esc(e.message||e)}</p><a class="btn ghost" href="#">กลับหน้าหลัก</a></div>`;
   }
@@ -1606,7 +1622,7 @@ async function renderProject(id, keep=false){
       <div style="flex:1;min-width:260px"><h1>${esc(p.name)}</h1>
         <div class="muted">${esc(dateRange(p))}${p.location?' · '+esc(p.location):''}</div>
         <div class="muted small">ปีงบประมาณ ${esc(p.fiscalYear||'-')} · ผู้รับผิดชอบ ${esc(p.responsible||'-')}</div></div>
-      <div class="row"><button class="btn ghost" id="refP" title="โหลดข้อมูลล่าสุด">🔄 รีเฟรช</button><a class="btn" href="#r-${esc(id)}">📄 รายงานสรุปผล</a><a class="btn ghost" href="#edit-${esc(id)}">แก้ไข</a><button class="btn ghost danger" id="delP">ลบ</button></div>
+      <div class="row"><span id="newBanner" class="pill" style="display:none;cursor:pointer;background:#fff3cd;color:#7a5a00;font-size:14px;padding:6px 12px">📥 มีผลใหม่เข้ามา — กดเพื่อดู</span><button class="btn ghost" id="refP" title="โหลดข้อมูลล่าสุด">🔄 รีเฟรช</button><a class="btn" href="#r-${esc(id)}">📄 รายงานสรุปผล</a><a class="btn ghost" href="#edit-${esc(id)}">แก้ไข</a><button class="btn ghost danger" id="delP">ลบ</button></div>
     </div>
     <div class="grid g4" style="margin-bottom:16px">
       <div class="stat"><div class="k">ผู้เข้าร่วมโครงการ</div><div class="v">${st.actual}${t?` <span style="font-size:16px;font-weight:400">/ ${t} คน</span>`:''}</div>
@@ -1703,15 +1719,19 @@ async function renderProject(id, keep=false){
   if(!window.QRCode){ try{ await loadScript('https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js'); }catch(e){} }
   try{ if(window.QRCode) new QRCode($('#qrbox'),{text:joinUrl,width:180,height:180,correctLevel:QRCode.CorrectLevel.M}); else $('#qrbox').textContent='โหลด QR ไม่ได้'; }catch(e){}
   $('#cpUrl').onclick=()=>copyText(joinUrl);
-  $('#refP').onclick=()=>renderProject(id,true);
+  $('#refP').onclick=()=>{ S.store.invalidate?.(`projects/${id}`); S.lastAuto=Date.now(); renderProject(id,true); };
+  if($('#newBanner')) $('#newBanner').onclick=()=>$('#refP').click();
   if($('#cpFail')) $('#cpFail').onclick=()=>copyText(ts.learners.filter(l=>l.post!=null&&pct(l.post,ts.N)<ts.cut).map((l,i)=>`${i+1}. ${l.name}${l.sid?' ('+l.sid+')':''} ได้ ${l.post}/${ts.N}`).join('\n'));
   // อัปเดตอัตโนมัติเมื่อผู้เรียนส่งข้อมูลเข้ามา
   if(S.watchPid!==id){
     if(S.unsub){ try{ S.unsub(); }catch(e){} }
-    S.watchPid=id; let t=null;
-    S.unsub=S.store.watchProject(id, ()=>{ clearTimeout(t); t=setTimeout(()=>{
-      if(location.hash!=='#p-'+id || $('.modal') || document.activeElement?.closest('#phs')) return;
-      toast('📥 มีข้อมูลใหม่จากผู้เรียน'); renderProject(id,true); },700); });
+    S.watchPid=id; let t=null; S.lastAuto=Date.now();
+    const doRefresh=()=>{ if(location.hash!=='#p-'+id || $('.modal') || document.activeElement?.closest('#phs')) return;
+      S.store.invalidate?.(`projects/${id}/`); S.lastAuto=Date.now(); toast('📥 มีข้อมูลใหม่จากผู้เรียน'); renderProject(id,true); };
+    // โหลดใหม่ทั้งหน้าไม่เกินทุก 60 วินาที (ช่วงที่ผู้เรียนส่งพร้อมกันจำนวนมาก จะไม่อ่านฐานข้อมูลซ้ำ ๆ)
+    S.unsub=S.store.watchProject(id, ()=>{ clearTimeout(t); const wait=Math.max(1000, 60000-(Date.now()-S.lastAuto));
+      const b=$('#newBanner'); if(b) b.style.display='';
+      t=setTimeout(doRefresh, wait); });
   }
   $('#cpSum').onclick=()=>copyText(summary);
   $$('.tog').forEach(b=>b.onclick=async()=>{
