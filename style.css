@@ -227,3 +227,9 @@ table.t tbody tr.sec td{background:#dcece4}
 table.t tbody tr.tot td{background:#fff}
 table.t tbody tr.expired td{background:#f1f2f1;color:#8a8f8c}
 table.t tbody tr.link:hover td{background:#d6ece1}
+/* รายการเลือกห้องเรียน: สลับสีเขียวอ่อน/ขาว (Chrome, Edge, Android) */
+select[name=room] option{background:#fff;color:#1d2622;padding:4px 6px}
+select[name=room] option:nth-child(even){background:#eaf5ef}
+select[name=room] option:checked{background:#1f6f5c;color:#fff}
+#pvR select option{background:#fff}
+#pvR select option:nth-child(even){background:#eaf5ef}
